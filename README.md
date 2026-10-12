@@ -6,7 +6,7 @@ Claude Code plugin. The main session (Opus) leads; cheap headless workers do the
 - **`cw` CLI** (`bin/`, on the Bash PATH) — starts one `claude -p` worker with a ~3k-token cold start.
   - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests).
   - Fleet tools: `cwgo` (background start), `cwwait` (notify on each finish), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`.
-- **Crew pane** — pixel-art side pane: each worker as a creature, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts.
+- **Crew pane** — pixel-art side pane: each worker as a creature, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts. Click a card's `details ›` for its task, latest notes, recent steps and report; `‹ back` (or `b`) returns.
 
 ## Install
 

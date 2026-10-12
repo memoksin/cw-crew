@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { buildWorkers, drawScene, layout, runState, sceneRows, type Meta, type Run } from '../hooks/scene'
+import { buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -132,6 +132,22 @@ test('a timed-out run chains its resume through the init sid; a renamed resume s
   const [plain] = buildWorkers([timedOut, finish], now)
   expect(plain?.name).toBe('camera_assist')
   expect(plain?.task).toBe('Camera assist')
+})
+
+test('each card gets a details button spot on its bottom edge, inside the card', async () => {
+  const runs: Run[] = ['x', 'y'].map((id, i) => ({
+    id, meta: meta({ role: 'coder', name: id, start: T0 + i }), events: [{ e: 'init', t: (T0 + i) * 1000 }],
+  }))
+  const now = (T0 + 5) * 1000
+  const ws = buildWorkers(runs, now)
+  expect(ws.map(w => w.runIds)).toEqual([['x'], ['y']])
+  const cols = 100
+  const { hits, rows } = drawScene(ws, cols, now)
+  expect(hits.map(h => h.key)).toEqual(ws.map(w => w.key))
+  for (const h of hits) {
+    expect(h.y).toBeLessThan(rows)
+    expect(h.x + DETAILS.length).toBeLessThan(cols)
+  }
 })
 
 test('a turn-limited run that cw auto-continues is never shown as failed', async () => {

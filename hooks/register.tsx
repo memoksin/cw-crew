@@ -3,14 +3,15 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { FRAME_MS, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, drawScene, encode, isActive, isVisible, parseEvents, sceneRows, SPRITE_COLS, SPRITE_ROWS,
+  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, parseEvents, sceneRows, SPRITE_COLS, SPRITE_ROWS,
   type Meta, type Run, type State, type Worker,
 } from './scene'
 
 const PANE = 'cw-crew'
 const DAY = 86_400_000
 const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
-
+const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
+const NOTES = 4, STEPS = 10, REPORT_CHARS = 2400
 type Tracked = Run & { size: number; final: boolean }
 
 // Module state: a reload starts it over and the next poll rebuilds it from the run files.
@@ -30,6 +31,9 @@ let status: string | undefined
 let opened = false
 let polling = false
 let lastKick = 0
+// Detail view: the open worker's live notes (its assistant text) and final report, refreshed by poll().
+let selKey = ''
+let detail: { key: string; size: number; notes: string[]; report?: string } = { key: '', size: -1, notes: [] }
 
 function readText($: EngineInterface, name: string) {
   return $.fs.read(`${dir}/${name}`).catch(() => undefined)
@@ -100,9 +104,40 @@ async function poll($: EngineInterface) {
     }
     // A pane hidden behind a tab drops its Raster; ask for a redraw now and then so the animation resumes.
     if (!mounted && opened && now - lastKick > 2000) { lastKick = now; $.ui.invalidate('ui.render') }
+    if (selKey) await refreshDetail($, all, byName)
   } finally {
     polling = false
   }
+}
+
+// The open worker's newest run: its stream (.jsonl) holds the notes, its result (.json) the report.
+async function refreshDetail($: EngineInterface, all: Worker[], byName: Map<string, { size: number }>) {
+  const w = all.find(x => x.key === selKey)
+  const id = w?.runIds.at(-1)
+  if (!w || !id) return
+  const size = byName.get(`${id}.jsonl`)?.size ?? 0
+  if (detail.key === w.key && detail.size === size && (w.end === undefined || detail.report !== undefined)) return
+  const notes: string[] = []
+  for (const line of ((await readText($, `${id}.jsonl`)) ?? '').split('\n')) {
+    if (!line.includes('"type":"assistant"')) continue
+    try {
+      const m = JSON.parse(line) as { message?: { content?: { type: string; text?: string }[] } }
+      for (const c of m.message?.content ?? []) if (c.type === 'text' && c.text?.trim()) notes.push(c.text.trim())
+    } catch { /* a line still being written */ }
+  }
+  let report: string | undefined
+  if (w.end !== undefined) {
+    try { report = ((JSON.parse((await readText($, `${id}.json`)) ?? '{}') as { result?: string }).result ?? '').trim() } catch { report = '' }
+  }
+  detail = { key: w.key, size, notes: notes.slice(-NOTES), report }
+  $.ui.invalidate('ui.render')
+}
+
+function openDetail($: EngineInterface, key: string) {
+  selKey = key
+  detail = { key: '', size: -1, notes: [] }
+  mounted = undefined
+  void update($, selected, () => key)
 }
 
 // Ask for the rows the scene needs (room for two workers once any run), not the default third of the screen.
@@ -174,6 +209,38 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, slots)
+    const sel = await read($, selected)
+    const open = sel ? workers.find(w => w.key === sel) : undefined
+    if (open) {
+      mounted = undefined   // paint() must not blit the scene over the detail view
+      const { Box, Text, Button } = $.ui.resolve(e)
+      const now = await $.clock.now()
+      const steps = (open.runIds.flatMap(id => runs.get(id)?.events ?? [])).filter(ev => ev.tool).slice(-STEPS)
+      const ago = (t: number) => clock(Math.max(0, now - t))
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Box flexDirection="row" gap={1}>
+            <Button key="back" hotkey="b" onPress={() => { selKey = ''; mounted = undefined; void update($, selected, () => '') }}>‹ back</Button>
+            <Text bold>{open.name}</Text>
+            <Text dimColor>{open.model} · {LABEL[open.state]} · {clock((open.end ?? now) - open.start)} · {open.turns} turns</Text>
+          </Box>
+          {open.state === 'ask' && open.question && <Text color="warning" wrap="wrap">? {open.question}</Text>}
+          <Text bold>Task</Text>
+          <Text dimColor wrap="wrap">{open.task.slice(0, 600)}</Text>
+          <Text bold>Latest notes</Text>
+          {detail.key !== open.key ? <Text dimColor>reading…</Text>
+            : detail.notes.length === 0 ? <Text dimColor>no notes yet</Text>
+            : detail.notes.map(n => <Text wrap="wrap">· {n.slice(0, 400)}</Text>)}
+          <Text bold>Recent steps</Text>
+          {steps.length === 0 ? <Text dimColor>none yet</Text>
+            : steps.map(ev => <Text wrap="truncate-end"><Text dimColor>{ago(ev.t)} ago </Text>{ev.tool} {ev.arg ?? ''}</Text>)}
+          {detail.key === open.key && detail.report !== undefined && <Text bold>Report</Text>}
+          {detail.key === open.key && detail.report !== undefined &&
+            <Text wrap="wrap">{detail.report ? detail.report.slice(0, REPORT_CHARS) : 'no report (timed out or killed)'}</Text>}
+        </Box>
+      )
+    }
+    if (sel) { selKey = ''; void update($, selected, () => '') }   // the worker left the crew
     if (e.surface !== 'terminal') {
       const { Box, Text } = $.ui.resolve(e)
       return (
@@ -183,15 +250,22 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const { Box, Image, Raster } = $.ui.resolve(e)
+    const { Box, Button, Image, Raster } = $.ui.resolve(e)
     const cols = Math.max(24, Math.min(512, e.props.bodyColumns))
     // Draw every card, even past the pane's height: the engine scrolls a body taller than its window.
     // Only the 256-row hard cap still folds workers into one-line rows.
     const maxRows = 256
-    const { rows, words, spots } = drawScene(workers, cols, await $.clock.now(), maxRows, images)
+    const { rows, words, spots, hits } = drawScene(workers, cols, await $.clock.now(), maxRows, images)
     mounted = { cols, rows, maxRows, images, keys: new Set(spots.map(s => s.key)) }
     const raster = <Raster key="crew" columns={cols} rows={rows} cells={encode(words)} />
-    if (!images) return raster
+    // A "details ›" Button on each card's bottom edge opens its detail view.
+    // Not `h`: JSX compiles to the global h(), which a parameter of that name would shadow.
+    const buttons = hits.map(hit => (
+      <Box position="absolute" top={hit.y} left={hit.x}>
+        <Button key={`open-${hit.key}`} plain dimColor onPress={() => openDetail($, hit.key)}>{DETAILS}</Button>
+      </Box>
+    ))
+    if (!images) return <Box width={cols} height={rows}>{raster}{buttons}</Box>
     // Each sprite an Image over the blank cells the scene left for it; paint() swaps its frames.
     shown = new Map(spots.map(s => [s.key, lookKey(s.look)]))
     return (
@@ -202,6 +276,7 @@ export const register: Register = on => {
             <Image key={s.key} source={imageSource(s.look, $.plugin.root)} columns={SPRITE_COLS} rows={SPRITE_ROWS} alt={s.alt} />
           </Box>
         ))}
+        {buttons}
       </Box>
     )
   })

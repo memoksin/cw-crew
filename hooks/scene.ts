@@ -24,6 +24,7 @@ export type Worker = {
   start: number; runStart: number; resumed: boolean
   state: State; stateAt: number; arg: string; trail: Kind[]; times: number[]; lastAt: number; tmo: number
   blocked: number; question?: string; end?: number; turns: number; out: number
+  runIds: string[]   // the chain's runs, oldest first: the detail view reads their files
 }
 
 const NAMES: Record<Role, string[]> = {
@@ -127,6 +128,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       turns: (prev?.turns ?? 0) + view.turns,
       out: (prev?.out ?? 0) + view.out,
       question: view.state === 'ask' ? run.question : undefined,
+      runIds: [...(prev?.runIds ?? []), run.id],
     }
     const at = prev ? workers.indexOf(prev) : -1
     if (at >= 0) workers[at] = w
@@ -229,7 +231,7 @@ export class Grid {
 export const encode = (words: Uint32Array): string =>
   (new Uint8Array(words.buffer) as Uint8Array & { toBase64(): string }).toBase64()
 
-const LABEL: Record<State, string> = {
+export const LABEL: Record<State, string> = {
   boot: 'waking up', resumed: 'answered', think: 'thinking', read: 'reading', write: 'writing',
   bash: 'command', web: 'on the web', test: 'testing', blocked: 'blocked', error: 'error', ask: 'asking',
   done: 'done', failed: 'failed',
@@ -276,7 +278,7 @@ export const sceneRows = (n: number, cols: number, maxRows?: number) => layout(n
 
 const RANK = (w: Worker) => (w.state === 'ask' ? 0 : !w.end ? 1 : w.state === 'failed' ? 2 : 3)
 
-const clock = (ms: number) => {
+export const clock = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
@@ -489,13 +491,17 @@ function header(g: Grid, ws: Worker[], now: number) {
 }
 
 // `images`: leave each sprite's cells blank and list it in `spots`, for an Image laid over them.
+// `hits`: where each card's "details" button goes (its bottom edge, right side), for a Button laid over it.
+export const DETAILS = 'details ›'
+export type Hit = { key: string; x: number; y: number }
 export function drawScene(
   ws: Worker[], cols: number, now: number, maxRows?: number, images = false,
-): { rows: number; words: Uint32Array; spots: Spot[] } {
+): { rows: number; words: Uint32Array; spots: Spot[]; hits: Hit[] } {
   const fit = layout(ws.length, cols, maxRows)
   const rows = fit.rows
   const g = new Grid(cols, rows)
   const spots: Spot[] = []
+  const hits: Hit[] = []
   const place: Place = (look, x, y, alt) => {
     if (images) spots.push({ key: `s${spots.length}`, x, y, look, alt })
     else g.pixels(smallSprite(look), x, y)
@@ -511,14 +517,18 @@ export function drawScene(
     }
     const msg = 'no workers · /orchestrate wakes them'
     g.text(Math.max(0, Math.floor((cols - [...msg].length) / 2)), HEADER_H + MH + 3, msg, FAINT)
-    return { rows, words: g.words(), spots }
+    return { rows, words: g.words(), spots, hits }
   }
   const per = perRow(cols)
   const W = Math.floor(cols / per)
   const cw = per > 1 ? W - 1 : W
   // Overflowing: questions and live workers keep the cards, finished ones drop to lines first.
   const list = fit.cards < ws.length ? [...ws].sort((a, b) => RANK(a) - RANK(b)) : ws
-  list.slice(0, fit.cards).forEach((w, i) => card(g, w, (i % per) * W, HEADER_H + Math.floor(i / per) * CARD_H, cw, now, place))
+  list.slice(0, fit.cards).forEach((w, i) => {
+    const x0 = (i % per) * W, y0 = HEADER_H + Math.floor(i / per) * CARD_H
+    card(g, w, x0, y0, cw, now, place)
+    hits.push({ key: w.key, x: Math.max(x0 + 2, x0 + cw - DETAILS.length - 3), y: y0 + CARD_H - 1 })
+  })
   const top = HEADER_H + Math.ceil(fit.cards / per) * CARD_H
   list.slice(fit.cards, fit.cards + fit.lines * per)
     .forEach((w, i) => line(g, w, (i % per) * W, top + Math.floor(i / per), W, now))
@@ -526,5 +536,5 @@ export function drawScene(
     const msg = `+${fit.more} more · enlarge the pane`
     g.text(Math.max(0, Math.floor((cols - [...msg].length) / 2)), rows - 1, msg, DIM)
   }
-  return { rows, words: g.words(), spots }
+  return { rows, words: g.words(), spots, hits }
 }
