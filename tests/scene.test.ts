@@ -109,6 +109,31 @@ test('two resumes of one sid, the first killed before its result, stay one worke
   expect(new Set(ws.map(w => w.key)).size).toBe(ws.length)
 })
 
+test('a timed-out run chains its resume through the init sid; a renamed resume shows its own name, task and clock', async () => {
+  const timedOut: Run = {
+    id: 't1', meta: meta({ role: 'coder', name: 'camera_assist', task: 'Camera assist' }), rc: 142,
+    events: [{ e: 'init', sid: 'sid-t', t: T0 * 1000 + 100 }, { e: 'tool', tool: 'Edit', arg: 'src/main.gd', t: T0 * 1000 + 500 }],
+  }
+  const finish: Run = {
+    id: 't2', meta: meta({ role: 'coder', name: 'camera_assist', resume: 'sid-t', start: T0 + 100, task: 'You hit the time limit' }), rc: 0,
+    events: [{ e: 'init', sid: 'sid-t', t: (T0 + 100) * 1000 + 50 }, { e: 'result', ok: true, sid: 'sid-t', turns: 3, out: 5, t: (T0 + 200) * 1000 }],
+  }
+  const fix: Run = {
+    id: 't3', meta: meta({ role: 'coder', name: 'camera_fix', resume: 'sid-t', start: T0 + 300, task: 'Playtest fixes' }),
+    events: [{ e: 'init', sid: 'sid-t', t: (T0 + 300) * 1000 + 50 }],
+  }
+  const now = (T0 + 360) * 1000
+  const ws = buildWorkers([timedOut, finish, fix], now)
+  expect(ws.length).toBe(1)
+  expect(ws[0]?.name).toBe('camera_fix')
+  expect(ws[0]?.task).toBe('Playtest fixes')
+  expect(ws[0]?.start).toBe((T0 + 300) * 1000)
+  expect(ws[0]?.resumed).toBe(true)
+  const [plain] = buildWorkers([timedOut, finish], now)
+  expect(plain?.name).toBe('camera_assist')
+  expect(plain?.task).toBe('Camera assist')
+})
+
 test('a turn-limited run that cw auto-continues is never shown as failed', async () => {
   const seg: Run = {
     id: 'm1', meta: meta({ role: 'coder', model: 'sonnet' }),

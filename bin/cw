@@ -133,7 +133,7 @@ jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESS
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep}' \
   > "$log.meta"
 ev='fromjson? |
-  if .type=="system" and .subtype=="init" then {e:"init"}
+  if .type=="system" and .subtype=="init" then {e:"init", sid:.session_id}
   elif .type=="assistant" then .message.content[]? |
     if .type=="tool_use" then {e:"tool",tool:.name,
       arg:((.input.file_path // .input.path // .input.command // .input.pattern // .input.query // .input.url // "")|tostring|.[0:120])}

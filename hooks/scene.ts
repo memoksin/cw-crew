@@ -106,14 +106,17 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
     const view = runState(run, now)
     const prev = run.meta.resume ? bySid.get(run.meta.resume) : undefined
     const role = run.meta.role === 'coder' ? 'coder' : 'scout'
+    // A resume started under its own fleet name (cwgo NAME -r sid) is a new job on the same creature:
+    // show that name, task and clock, as cwls does.
+    const renamed = !!prev && !!run.meta.name && run.meta.name !== prev.name
     const w: Worker = {
       key: prev?.key ?? run.id,
       role,
       model: run.meta.model,
       effort: run.meta.effort ?? '',
-      name: prev?.name ?? (run.meta.name || NAMES[role][used[role]++ % NAMES[role].length] + (used[role] > 10 ? String(Math.ceil(used[role] / 10)) : '')),
-      task: prev?.task ?? run.meta.task,
-      start: prev?.start ?? run.meta.start * 1000,
+      name: renamed ? run.meta.name! : prev?.name ?? (run.meta.name || NAMES[role][used[role]++ % NAMES[role].length] + (used[role] > 10 ? String(Math.ceil(used[role] / 10)) : '')),
+      task: renamed ? run.meta.task : prev?.task ?? run.meta.task,
+      start: renamed ? run.meta.start * 1000 : prev?.start ?? run.meta.start * 1000,
       runStart: run.meta.start * 1000,
       tmo: run.meta.tmo,
       resumed: !!prev,
@@ -131,7 +134,8 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
     // A run that dies before its result (killed, timeout) never maps its sid, so the next resume
     // of the same sid still finds `prev`; point it at the newest run or two workers share a key.
     if (prev) for (const [k, v] of bySid) if (v === prev) bySid.set(k, w)
-    const sid = [...run.events].reverse().find(ev => ev.e === 'result')?.sid
+    // init carries the sid too, so a run that timed out before its result still chains its resume.
+    const sid = [...run.events].reverse().find(ev => ev.sid)?.sid
     if (sid) bySid.set(sid, w)
   }
   return workers
