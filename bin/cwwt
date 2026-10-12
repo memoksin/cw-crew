@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# cwwt — git worktrees for cw workers, outside the repo, ready to build and test.
+#   cwwt create NAME [-K path]...   new (or reuse) ../<repo>-wt/NAME on branch wt/NAME; prints its path
+#   cwwt path NAME                  print the path
+#   cwwt diff NAME [git diff opts]  the worker's changes only (vs the state at create)
+#   cwwt apply NAME                 apply the worker's changes to the main tree (stops on conflict)
+#   cwwt rm NAME                    remove the worktree and its branch
+#   cwwt list
+# Run from inside the main repo. create carries the main tree's uncommitted changes and untracked files,
+# then clones (APFS cp -c: instant, no extra space) git-ignored paths the project needs to build/test:
+# those listed in <repo>/.cw-copy (one path per line, # comments) plus each -K path. Only ignored files
+# under a listed path are copied, so tracked files are never overwritten.
+# The state at create is saved as a git tree object (no commit), so diff/apply show only the worker's work.
+set -uo pipefail
+
+die() { echo "cwwt: $*" >&2; exit 2; }
+cmd=${1:-}; shift || true
+name=${1:-}; shift || true
+[ "$cmd" = list ] || [ -n "$name" ] || die "usage: cwwt create|path|diff|apply|rm|list NAME"
+case $name in *[!A-Za-z0-9._-]*) die "bad name: $name" ;; esac
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repo"
+# a worktree's toplevel is the worktree itself: resolve the main repo through the common git dir
+common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
+repo=$(dirname "$common")
+root=${CW_WT_ROOT:-$(dirname "$repo")/$(basename "$repo")-wt}
+wt=$root/$name
+basef=$root/.$name.base
+
+# Tree object of the worktree as it is now (tracked + untracked, minus ignored), via a throwaway index.
+snap() {
+  local idx; idx=$(mktemp)
+  cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
+  GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1 || { rm -f "$idx"; die "snapshot failed in $wt"; }
+  GIT_INDEX_FILE=$idx git -C "$wt" write-tree; rm -f "$idx"
+}
+
+case $cmd in
+create)
+  keep=()
+  while getopts "K:" o; do case $o in K) keep+=("$OPTARG") ;; *) die "bad option" ;; esac; done
+  if [ -d "$wt" ]; then echo "$wt"; exit 0; fi
+  mkdir -p "$root"
+  if git -C "$repo" show-ref -q --verify "refs/heads/wt/$name"; then
+    git -C "$repo" worktree add -q "$wt" "wt/$name" || die "worktree add failed"
+  else
+    git -C "$repo" worktree add -q -b "wt/$name" "$wt" HEAD || die "worktree add failed"
+  fi
+  # carry the lead's uncommitted work so the worker starts from what the lead sees
+  if ! git -C "$repo" diff --quiet HEAD; then
+    git -C "$repo" diff --binary HEAD | git -C "$wt" apply --binary || die "could not carry uncommitted changes"
+  fi
+  (cd "$repo" && git ls-files -o --exclude-standard -z | tar --null -cf - -T - 2>/dev/null) | tar -xf - -C "$wt"
+  list=()
+  [ -f "$repo/.cw-copy" ] && while IFS= read -r l; do
+    l=${l%%#*}; l=${l%"${l##*[![:space:]]}"}; [ -n "$l" ] && list+=("$l")
+  done < "$repo/.cw-copy"
+  list+=("${keep[@]+"${keep[@]}"}")
+  n=0
+  for p in "${list[@]+"${list[@]}"}"; do
+    while IFS= read -r -d '' f; do
+      f=${f%/}
+      mkdir -p "$wt/$(dirname "$f")"
+      { cp -cR "$repo/$f" "$wt/$f" 2>/dev/null || cp -R "$repo/$f" "$wt/$f"; } && n=$((n + 1))   # -c = APFS clone
+    done < <(git -C "$repo" ls-files -o -i --exclude-standard --directory -z -- "$p")
+  done
+  snap > "$basef"
+  echo "cwwt: $wt (branch wt/$name, $n ignored paths cloned)" >&2
+  echo "$wt"
+  ;;
+path) [ -d "$wt" ] || die "no worktree $name"; echo "$wt" ;;
+diff)
+  [ -f "$basef" ] || die "no base for $name"
+  git -C "$wt" diff "$@" "$(cat "$basef")" "$(snap)"
+  ;;
+apply)
+  [ -f "$basef" ] || die "no base for $name"
+  patch=$(mktemp); err=$(mktemp)
+  git -C "$wt" diff --binary "$(cat "$basef")" "$(snap)" > "$patch"
+  [ -s "$patch" ] || { echo "cwwt: $name has no changes"; rm -f "$patch"; exit 0; }
+  if git -C "$repo" apply --check --binary "$patch" 2>"$err"; then
+    git -C "$repo" apply --binary "$patch" && git -C "$repo" apply --stat "$patch" | tail -1
+    # next apply/diff only shows what comes after this
+    snap > "$basef"
+  else
+    echo "cwwt: $name does not apply cleanly to the main tree (nothing changed):" >&2
+    cat "$err" >&2
+    echo "patch kept: $patch  (resolve: git -C $repo apply --3way $patch, or apply by hand)" >&2
+    exit 1
+  fi
+  rm -f "$patch" "$err"
+  ;;
+rm)
+  [ -d "$wt" ] && { git -C "$repo" worktree remove --force "$wt" || die "worktree remove failed"; }
+  git -C "$repo" branch -D "wt/$name" >/dev/null 2>&1
+  rm -f "$basef"; echo "cwwt: removed $name"
+  ;;
+list) git -C "$repo" worktree list | grep -F "$root/" || true ;;
+*) die "unknown command $cmd" ;;
+esac

@@ -1,0 +1,42 @@
+#!/bin/bash
+# cwkill PID... — the only way a cw worker may stop a process.
+# Allowed: a descendant of this worker's own cw process, or a process whose command starts with one of
+# the colon-separated prefixes in $CW_KILL_ALLOW (apps launched via open(1) are not descendants).
+# Anything else is refused: ask the orchestrator with PERMISSION.
+[ $# -gt 0 ] || { echo "usage: cwkill PID..." >&2; exit 2; }
+
+ppid_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+cmd_of() { ps -o command= -p "$1" 2>/dev/null; }
+
+# This worker's cw process: nearest ancestor running the cw script.
+root=""; p=$PPID
+while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+  case $(cmd_of "$p") in */cw\ coder*|*/cw\ scout*) root=$p; break ;; esac
+  p=$(ppid_of "$p")
+done
+[ -n "$root" ] || { echo "cwkill: not running under a cw worker; refused" >&2; exit 3; }
+
+ancestors=" $$ "; p=$PPID
+while [ -n "$p" ] && [ "$p" -gt 1 ]; do ancestors+="$p "; p=$(ppid_of "$p"); done
+
+rc=0
+for pid in "$@"; do
+  case $pid in ''|*[!0-9]*) echo "cwkill: $pid: not a PID" >&2; rc=2; continue ;; esac
+  [ "$pid" -gt 1 ] || { echo "cwkill: $pid: refused" >&2; rc=3; continue; }
+  case $ancestors in *" $pid "*) echo "cwkill: $pid is this worker itself; refused" >&2; rc=3; continue ;; esac
+  ok=0; p=$(ppid_of "$pid")
+  [ -n "$p" ] || { echo "cwkill: $pid: no such process" >&2; rc=1; continue; }
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" = "$root" ] && { ok=1; break; }
+    p=$(ppid_of "$p")
+  done
+  c=$(cmd_of "$pid"); IFS=: read -ra pre <<< "${CW_KILL_ALLOW:-}"
+  for x in "${pre[@]+"${pre[@]}"}"; do [ -n "$x" ] && [ "${c#"$x"}" != "$c" ] && ok=1; done
+  if [ "$ok" = 1 ]; then
+    kill "$pid" && echo "cwkill: stopped $pid" || rc=1
+  else
+    echo "cwkill: $pid ($(cmd_of "$pid" | cut -c1-80)) was not started by this worker; refused. Ask with PERMISSION if it must stop." >&2
+    rc=3
+  fi
+done
+exit $rc

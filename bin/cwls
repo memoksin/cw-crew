@@ -1,0 +1,26 @@
+#!/bin/bash
+# cwls   one line per fleet worker (see cwgo): state, time, turns, sid, acceptance, report preview.
+fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
+[ -d "$fleet" ] || { echo "cwls: no fleet at $fleet" >&2; exit 2; }
+now=$(date +%s)
+for f in "$fleet"/*.err; do
+  [ -e "$f" ] || continue
+  base=${f%.err}; name=$(basename "$base")
+  meta=$(grep -E '^\[cw (scout|coder) ' "$f" | tail -1)
+  if [ -n "$meta" ]; then
+    state=done
+    case $meta in *" rc=142 "*) state=TIMEOUT ;; *error_max_turns*) state=MAX_TURNS ;; *" rc=0 "*) ;; *) state=FAILED ;; esac
+    grep -q '^\[cw ASK' "$f" && state=QUESTION
+    grep -q '^\[cw PERM' "$f" && state=PERMISSION
+    case $state in QUESTION|PERMISSION) "$(dirname "$0")/cwopen" -q "$(sed -nE 's/.* sid=([^ ]+) .*/\1/p' <<< "$meta")" "$f" && state="$state(answered)" ;; esac
+    case $meta in *accept=FAIL*) state="$state,ACCEPT_FAIL" ;; esac
+    info=$(sed -nE 's/.* (sid=[^ ]+) (turns=[0-9]+).* ([0-9]+s)( accept=[^ ]+)? log=.*/\3 \2 \1\4/p' <<< "$meta")
+  elif [ -f "$base.pid" ] && kill -0 "$(cat "$base.pid")" 2>/dev/null; then
+    state=running; info="$(( now - $(stat -f %m "$base.task" 2>/dev/null || stat -c %Y "$base.task") ))s"
+    grep -q '^cw: turn limit' "$f" && info="$info (auto-continued)"
+  else
+    state=DIED; info=$(tail -1 "$f" | cut -c1-80)
+  fi
+  seen=""; [ -e "$base.seen" ] && seen=" ·reviewed"
+  printf '%-14s %-22s %s%s\n' "$name" "$state" "$info" "$seen"
+done

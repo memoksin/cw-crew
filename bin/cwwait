@@ -1,0 +1,52 @@
+#!/bin/bash
+# cwwait                 wait until any fleet worker (see cwgo) finishes that was not reported yet;
+#                        print its meta lines and report, mark it reported (NAME.seen). Exits 0.
+#                        If nothing is running and nothing is unreported: prints "fleet idle", exits 1.
+# cwwait <worker.err>... old mode: exit as soon as ANY listed file has its cw meta line.
+# Run it in the background (run_in_background); the notification carries the report.
+# One { } block: parsed whole before running, so edits to this file cannot break a running waiter.
+{
+# A waiter whose output is thrown away would mark reports seen that nobody read.
+[ -c /dev/stdout ] && ! [ -t 1 ] && { echo "cwwait: stdout is /dev/null; refusing (reports would be lost)" >&2; exit 2; }
+show() {   # $1 = .err file
+  local f=$1 base=${1%.err}
+  echo "=== FINISHED: $(basename "$base")"
+  grep '^\[cw ' "$f"
+  grep '^cw: turn limit' "$f"
+  if [ -f "$base.out" ]; then echo "--- report"; tail -c "${CW_WAIT_REPORT:-6000}" "$base.out"; echo; fi
+}
+
+if [ $# -gt 0 ]; then
+  while true; do
+    for f in "$@"; do
+      if grep -q '^\[cw ' "$f" 2>/dev/null; then show "$f"; exit 0; fi
+    done
+    sleep 10
+  done
+fi
+
+fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
+[ -d "$fleet" ] || { echo "cwwait: no fleet at $fleet" >&2; exit 2; }
+while true; do
+  done_any=0; running=0
+  for f in "$fleet"/*.err; do
+    [ -e "$f" ] || continue
+    base=${f%.err}
+    [ -e "$base.seen" ] && continue
+    if grep -q '^\[cw ' "$f" 2>/dev/null; then
+      show "$f"; touch "$base.seen"; done_any=1
+    elif [ -f "$base.pid" ] && kill -0 "$(cat "$base.pid")" 2>/dev/null; then
+      running=$((running + 1))
+    else
+      echo "=== DIED without a result: $(basename "$base")"; tail -5 "$f"; touch "$base.seen"; done_any=1
+    fi
+  done
+  if [ $done_any = 1 ]; then
+    echo "(still running: $running)"
+    q=$("$(dirname "$0")/cwopen") && printf '\n=== OPEN QUESTIONS / PERMISSIONS — answer before anything else:\n%s\n' "$q"
+    exit 0
+  fi
+  [ $running = 0 ] && { echo "fleet idle: nothing running, nothing unreported ($fleet)"; exit 1; }
+  sleep 10
+done
+}

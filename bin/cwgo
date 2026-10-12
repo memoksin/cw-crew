@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# cwgo NAME ROLE [cw options...] [-- spec.md...]   start a cw worker in the background, as part of the fleet
+#   Task = the spec files joined in order (shared parts first), or stdin when no files are given.
+#   Files go to the fleet dir: NAME.task / .out / .err / .pid. A NAME already used gets .2, .3, ...
+#   Fleet dir: $CW_FLEET, default ~/.claude/cw-runs/fleet/<repo or dir name>.
+#   Examples: cwgo l1 coder -W l1 -e high -T 'make test' -- specs/common.md specs/l1.md
+#             cwgo l1 coder -r <sid> <<< "Fix: ..."        (resume; runs in the session's own dir)
+# Env (CW_CODER_MODEL, CW_MAX_TURNS, ...) passes through to cw.
+set -uo pipefail
+die() { echo "cwgo: $*" >&2; exit 2; }
+[ $# -ge 2 ] || die "usage: cwgo NAME scout|coder [cw options...] [-- spec.md...]"
+name=$1; shift
+case $name in *[!A-Za-z0-9._-]*) die "bad name: $name" ;; esac
+args=(); files=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = -- ]; then shift; files=("$@"); break; fi
+  args+=("$1"); shift
+done
+fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
+mkdir -p "$fleet"
+n=$name; i=2
+while [ -e "$fleet/$n.err" ]; do n=$name.$i; i=$((i + 1)); done
+if [ ${#files[@]} -gt 0 ]; then
+  cat "${files[@]}" > "$fleet/$n.task" || die "cannot read spec files"
+elif [ ! -t 0 ]; then
+  cat > "$fleet/$n.task"
+else
+  die "no task: give spec files after -- or the task on stdin"
+fi
+[ -s "$fleet/$n.task" ] || die "empty task"
+CW_NAME=$n nohup "$(dirname "$0")/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
+echo $! > "$fleet/$n.pid"
+echo "started $n (pid $!) in $fleet"

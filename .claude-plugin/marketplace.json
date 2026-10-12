@@ -1,0 +1,14 @@
+{
+  "name": "cw-crew",
+  "owner": {
+    "name": "Mehmet Yiğit Keskin"
+  },
+  "plugins": [
+    {
+      "name": "cw-crew",
+      "source": "./",
+      "description": "Headless Claude worker fleet (cw) + orchestrate skill + live crew pane"
+    }
+  ],
+  "description": "Headless Claude worker fleet with a live crew pane"
+}
