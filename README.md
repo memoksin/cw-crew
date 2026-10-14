@@ -16,9 +16,33 @@ Claude Code plugin. The main session (Opus) leads; cheap headless workers do the
 
 Answer `y` to add the marketplace, then pick a scope.
 
+### Windows
+
+1. In PowerShell, install everything with winget:
+
+   ```powershell
+   winget install -e --id Git.Git
+   winget install -e --id jqlang.jq
+   winget install -e --id Anthropic.ClaudeCode
+   winget install -e --id BurntSushi.ripgrep.MSVC   # optional, faster scout searches
+   winget install -e --id sharkdp.fd                # optional
+   ```
+
+   Git for Windows brings Git Bash (Claude Code's Bash tool), `perl` and `git`.
+2. Open a new terminal so the new PATH applies, then run `claude` and the `/plugin install` line above.
+3. If Claude Code does not find Git Bash, add to `%USERPROFILE%\.claude\settings.json`:
+
+   ```json
+   { "env": { "CLAUDE_CODE_GIT_BASH_PATH": "C:\\Program Files\\Git\\bin\\bash.exe" } }
+   ```
+
+4. Check: ask Claude to run `cw scout <<< "Reply ok. No tools."`. The last line must contain `rc=0`.
+
+Update later with `winget upgrade --all` and `claude plugin update cw-crew@cw-crew`.
+
 ## Requirements
 
-- macOS, Linux or Windows, bash. On Windows: Git for Windows (Claude Code uses its Git Bash; it ships `perl` and `git`) plus `jq` (`winget install jqlang.jq`).
+- macOS, Linux or Windows, bash. On Windows: Git for Windows and `jq`, see [Windows](#windows).
 - `claude`, `jq`, `perl`, `git` on PATH. `rg` and `fd` help scouts but are optional.
 - Right-side pane: fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`, outside tmux) and ≥110 columns. Otherwise it sits above the prompt. Sprites need a terminal with an image protocol; others get half-blocks.
 - Claude desktop app (Code tab): the same pane and PNG sprites, drawn as one SVG; a `details ›` button per worker sits under it. Install the plugin from a terminal at user scope; the desktop session loads it.
