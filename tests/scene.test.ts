@@ -282,3 +282,13 @@ test('sceneSvg turns half-blocks into rects and text into text', () => {
   expect(svg).toContain('>A</text>')
   expect(svg).toContain('>&lt;</text>')
 })
+
+test('sceneSvg never puts a space in a text run, so no surface can stretch one', () => {
+  const D = 0x01000000, c = 0x4fd1c5
+  // Same colour on both sides of a gap: one run would span it.
+  const words = Uint32Array.of(0x2503, c, D, 0x20, D, D, 0x20, D, D, 0x64, c, D)
+  const svg = sceneSvg(words, 4, 1)
+  expect(svg).toContain('textLength="6" lengthAdjust="spacingAndGlyphs">┃</text>')
+  expect(svg).toContain('x="18" y="9.5" fill="#4fd1c5" textLength="6" lengthAdjust="spacingAndGlyphs">d</text>')
+  expect(/<text[^>]*>[^<]* [^<]*<\/text>/.test(svg)).toBe(false)
+})

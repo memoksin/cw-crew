@@ -209,7 +209,7 @@ export const register: Register = on => {
     await $.ui.open(paneArgs())
     const { isFullscreen, columns } = e.presentation
     // The layout hints are the terminal's; the desktop places the pane itself.
-    const where = e.origin.kind !== 'composer' ? ''
+    const where = (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === 'claude-desktop' ? ''
       : !isFullscreen
       ? ' It sits above the prompt: the right-side pane needs the fullscreen layout (CLAUDE_CODE_NO_FLICKER=1, outside tmux).'
       : columns < 110 ? ` It sits above the prompt: the right-side pane needs a terminal of at least 110 columns (now ${columns}).` : ''

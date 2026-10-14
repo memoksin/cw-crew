@@ -554,12 +554,12 @@ export function sceneSvg(words: Uint32Array, cols: number, rows: number, sprites
   const q = new Int32Array(cols * 2 * rows * 2).fill(-1)
   const texts: string[] = []
   for (let y = 0; y < rows; y++) {
+    // Runs end at spaces: a surface may collapse them, and textLength would then stretch the rest.
     let run = '', runX = 0, runFg = -1
     const flush = () => {
-      const s = run.trimEnd()
-      if (s.trim()) {
-        const n = [...s].length
-        texts.push(`<text x="${runX * CW}" y="${y * CH + 9.5}" fill="${hex(runFg)}" textLength="${n * CW}" lengthAdjust="spacingAndGlyphs">${esc(s)}</text>`)
+      if (run) {
+        const n = [...run].length
+        texts.push(`<text x="${runX * CW}" y="${y * CH + 9.5}" fill="${hex(runFg)}" textLength="${n * CW}" lengthAdjust="spacingAndGlyphs">${esc(run)}</text>`)
       }
       run = ''; runFg = -1
     }
@@ -574,7 +574,7 @@ export function sceneSvg(words: Uint32Array, cols: number, rows: number, sprites
       const mask = QUARTERS[g]
       if (mask !== undefined) { fill(mask, fg === DEF ? TEXT : fg); flush(); continue }
       const c = fg === DEF ? TEXT : fg & 0xffffff
-      if (g === 0x20) { if (run) run += ' '; continue }
+      if (g === 0x20) { flush(); continue }
       if (run && c !== runFg) flush()
       if (!run) { runX = x; runFg = c }
       run += String.fromCodePoint(g)
@@ -600,5 +600,5 @@ export function sceneSvg(words: Uint32Array, cols: number, rows: number, sprites
     `<rect width="${vw}" height="${vh}" rx="6" fill="${hex(0x1b1c22)}"/>` +
     [...paths].map(([c, d]) => `<path fill="${hex(c)}" d="${d}"/>`).join('') +
     sprites.map(s => `<image x="${s.x * CW}" y="${s.y * CH}" width="${MW * CW}" height="${MH * CH}" style="image-rendering:pixelated" href="data:image/png;base64,${s.base64}"/>`).join('') +
-    `<g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="10" xml:space="preserve">${texts.join('')}</g></svg>`
+    `<g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="10">${texts.join('')}</g></svg>`
 }
