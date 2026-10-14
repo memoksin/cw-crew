@@ -12,11 +12,12 @@ const FILES: Record<string, string> = {
   'a.jsonl': '{"type":"assistant","message":{"content":[{"type":"text","text":"Running the tests now."}]}}\n',
 }
 
-test('the crew pane draws cards with a details button, opens the detail view and goes back', async ($, on) => {
+for (const surface of ['terminal', 'desktop'] as const) test(`${surface}: the crew pane draws cards with a details button, opens the detail view and goes back`, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
   on('fs.list', async () => ({ value: Object.entries(FILES).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
   on('fs.read', async (_$, e) => {
+    if (e.path.includes('/frames/')) return { value: { base64: 'UE5H' } } as never
     const name = e.path.slice(DIR.length + 1)
     if (!(name in FILES)) return { deny: `no ${name}` } as never
     return { value: FILES[name] } as never
@@ -29,11 +30,12 @@ test('the crew pane draws cards with a details button, opens the detail view and
   await $.session.start({ cwd: '/w' } as never)
   await clock.advance(500)
   const ui = await $.ui.mount({
-    plugin: 'cw-crew', surface: 'terminal', component: 'Pane', requestId: 'cw-crew',
+    plugin: 'cw-crew', surface, component: 'Pane', requestId: 'cw-crew',
     props: { title: 'Crew', isFocused: false, bodyColumns: 60, placement: 'dock' } as never,
   })
   await ui.drawn()
   expect(await ui.find({ key: 'open-a' })).toBeDefined()
+  if (surface === 'desktop') expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain('href="data:image/png;base64,UE5H"')
   await ui.press({ key: 'open-a' })
   await clock.advance(500)
   expect(await ui.find({ type: 'Text', text: /Running the tests now/ })).toBeDefined()

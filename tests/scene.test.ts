@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, type Meta, type Run } from '../hooks/scene'
+import { buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -271,4 +271,14 @@ test('a card shows the activity strip, the quiet warning and a budget bar', asyn
   // 80 s of a 100 s budget: the bar is amber
   const B = 2 + 5, fg = (x: number) => words[(B * 60 + x) * 3 + 1]
   expect(fg(2)).toBe(0xffb347)
+})
+
+test('sceneSvg turns half-blocks into rects and text into text', () => {
+  const D = 0x01000000
+  const words = Uint32Array.of(0x2580, 0xff0000, 0x00ff00, 0x41, D, D, 0x3c, 0x0000ff, D)
+  const svg = sceneSvg(words, 3, 1)
+  expect(svg).toContain('<path fill="#ff0000" d="M0 0h6v6h-6z"/>')
+  expect(svg).toContain('<path fill="#00ff00" d="M0 6h6v6h-6z"/>')
+  expect(svg).toContain('>A</text>')
+  expect(svg).toContain('>&lt;</text>')
 })

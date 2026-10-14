@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { FRAME_MS, imageSource, lookKey } from './creatures'
+import { FRAME_MS, frameFile, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, parseEvents, sceneRows, SPRITE_COLS, SPRITE_ROWS,
+  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, parseEvents, sceneRows, sceneSvg, SPRITE_COLS, SPRITE_ROWS,
   type Meta, type Run, type State, type Worker,
 } from './scene'
 
@@ -31,6 +31,11 @@ let status: string | undefined
 let opened = false
 let polling = false
 let lastKick = 0
+// Surfaces with no Raster (desktop, editor, mobile) get the scene as an Svg, redrawn by poll() while shown.
+let svgAt = 0
+let svgKick = 0
+// PNG frames as base64, read once each; a session sees a few dozen of the 650.
+const pngs = new Map<string, string>()
 // Detail view: the open worker's live notes (its assistant text) and final report, refreshed by poll().
 let selKey = ''
 let detail: { key: string; size: number; notes: string[]; report?: string } = { key: '', size: -1, notes: [] }
@@ -104,6 +109,8 @@ async function poll($: EngineInterface) {
     }
     // A pane hidden behind a tab drops its Raster; ask for a redraw now and then so the animation resumes.
     if (!mounted && opened && now - lastKick > 2000) { lastKick = now; $.ui.invalidate('ui.render') }
+    // ponytail: whole-Svg redraw per poll, no per-frame blit there; fine for a handful of workers.
+    else if (!selKey && now - svgAt < 5000 && now - svgKick >= (active ? 400 : 2000)) { svgKick = now; $.ui.invalidate('ui.render') }
     if (selKey) await refreshDetail($, all, byName)
   } finally {
     polling = false
@@ -201,7 +208,9 @@ export const register: Register = on => {
     mounted = undefined
     await $.ui.open(paneArgs())
     const { isFullscreen, columns } = e.presentation
-    const where = !isFullscreen
+    // The layout hints are the terminal's; the desktop places the pane itself.
+    const where = e.origin.kind !== 'composer' ? ''
+      : !isFullscreen
       ? ' It sits above the prompt: the right-side pane needs the fullscreen layout (CLAUDE_CODE_NO_FLICKER=1, outside tmux).'
       : columns < 110 ? ` It sits above the prompt: the right-side pane needs a terminal of at least 110 columns (now ${columns}).` : ''
     return { text: `Crew pane opened.${where}` }
@@ -242,11 +251,34 @@ export const register: Register = on => {
     }
     if (sel) { selKey = ''; void update($, selected, () => '') }   // the worker left the crew
     if (e.surface !== 'terminal') {
-      const { Box, Text } = $.ui.resolve(e)
+      const { Box, Text, Button, Svg } = $.ui.resolve(e)
+      const now = await $.clock.now()
+      svgAt = now
+      const cols = Math.max(46, Math.min(138, e.props.bodyColumns))
+      let { rows, words, spots } = drawScene(workers, cols, now, 256, true)
+      const sprites = []
+      for (const s of spots) {
+        const file = frameFile(s.look)
+        let base64 = pngs.get(file)
+        if (base64 === undefined) {
+          base64 = await $.fs.read(`${$.plugin.root}/frames/${file}`, { as: 'bytes' }).then(r => r.base64, () => '')
+          pngs.set(file, base64)
+        }
+        if (base64) sprites.push({ x: s.x, y: s.y, base64 })
+      }
+      let svg = sceneSvg(words, cols, rows, sprites)
+      // A frame that would not read, or too many sprites for one Svg: half-block pixels instead.
+      if (sprites.length < spots.length || svg.length > 131_072) { ({ rows, words } = drawScene(workers, cols, now, 256, false)); svg = sceneSvg(words, cols, rows) }
+      const alt = workers.length ? workers.map(w => `${w.name} ${w.role} ${LABEL[w.state]}`).join(', ') : 'no workers'
       return (
-        <Box flexDirection="column">
-          {workers.length === 0 && <Text dimColor>no workers</Text>}
-          {workers.map(w => <Text>{w.name} · {w.role} · {w.state}</Text>)}
+        <Box flexDirection="column" gap={1}>
+          {svg.length <= 131_072 ? <Svg key="crew" source={svg} alt={alt} />
+            : workers.map(w => <Text>{w.name} · {w.role} · {LABEL[w.state]}</Text>)}
+          {workers.length > 0 && (
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              {workers.map(w => <Button key={`open-${w.key}`} onPress={() => openDetail($, w.key)}>{w.name} {DETAILS}</Button>)}
+            </Box>
+          )}
         </Box>
       )
     }

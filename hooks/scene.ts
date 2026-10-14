@@ -538,3 +538,67 @@ export function drawScene(
   }
   return { rows, words: g.words(), spots, hits }
 }
+
+// ---------- svg (surfaces with no Raster: desktop, editor, mobile) ----------
+
+// One cell is CW x CH; each half-block pixel (CW x CH/2) comes out square. Every cell splits into
+// 2x2 quarters so ▀▄█▌▐ map to rects, merged into runs and one path per colour; other glyphs are text.
+const CW = 6, CH = 12
+const hex = (c: number) => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const QUARTERS: Record<number, number> = { 0x2580: 0b1100, 0x2584: 0b0011, 0x2588: 0b1111, 0x258c: 0b1010, 0x2590: 0b0101 }
+
+// `sprites`: PNG frames laid over the blank cells drawScene(images = true) left, as data URIs.
+export type SvgSprite = { x: number; y: number; base64: string }
+export function sceneSvg(words: Uint32Array, cols: number, rows: number, sprites: SvgSprite[] = [], scale = 1.5): string {
+  const q = new Int32Array(cols * 2 * rows * 2).fill(-1)
+  const texts: string[] = []
+  for (let y = 0; y < rows; y++) {
+    let run = '', runX = 0, runFg = -1
+    const flush = () => {
+      const s = run.trimEnd()
+      if (s.trim()) {
+        const n = [...s].length
+        texts.push(`<text x="${runX * CW}" y="${y * CH + 9.5}" fill="${hex(runFg)}" textLength="${n * CW}" lengthAdjust="spacingAndGlyphs">${esc(s)}</text>`)
+      }
+      run = ''; runFg = -1
+    }
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 3
+      const g = words[i] ?? 0x20, fg = words[i + 1] ?? DEF, bg = words[i + 2] ?? DEF
+      const fill = (mask: number, c: number) => {
+        if (c === DEF) return
+        for (let k = 0; k < 4; k++) if (mask & (8 >> k)) q[(y * 2 + (k >> 1)) * cols * 2 + x * 2 + (k & 1)] = c & 0xffffff
+      }
+      fill(0b1111, bg)
+      const mask = QUARTERS[g]
+      if (mask !== undefined) { fill(mask, fg === DEF ? TEXT : fg); flush(); continue }
+      const c = fg === DEF ? TEXT : fg & 0xffffff
+      if (g === 0x20) { if (run) run += ' '; continue }
+      if (run && c !== runFg) flush()
+      if (!run) { runX = x; runFg = c }
+      run += String.fromCodePoint(g)
+    }
+    flush()
+  }
+  const paths = new Map<number, string>()
+  const W = cols * 2
+  for (let j = 0; j < rows * 2; j++) {
+    for (let i = 0; i < W;) {
+      const c = q[j * W + i] ?? -1
+      let k = i + 1
+      while (k < W && q[j * W + k] === c) k++
+      if (c >= 0) {
+        const w = ((k - i) * CW) / 2
+        paths.set(c, `${paths.get(c) ?? ''}M${(i * CW) / 2} ${(j * CH) / 2}h${w}v${CH / 2}h-${w}z`)
+      }
+      i = k
+    }
+  }
+  const vw = cols * CW, vh = rows * CH
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${vw} ${vh}" width="${vw * scale}" height="${vh * scale}">` +
+    `<rect width="${vw}" height="${vh}" rx="6" fill="${hex(0x1b1c22)}"/>` +
+    [...paths].map(([c, d]) => `<path fill="${hex(c)}" d="${d}"/>`).join('') +
+    sprites.map(s => `<image x="${s.x * CW}" y="${s.y * CH}" width="${MW * CW}" height="${MH * CH}" style="image-rendering:pixelated" href="data:image/png;base64,${s.base64}"/>`).join('') +
+    `<g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="10" xml:space="preserve">${texts.join('')}</g></svg>`
+}
