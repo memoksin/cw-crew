@@ -13,6 +13,16 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 for b in claude jq perl; do command -v "$b" >/dev/null || { echo "cw: needs $b on PATH" >&2; exit 2; }; done
+# A native jq.exe writes CRLF under Git Bash unless given --binary (jq >= 1.7); the CR would end up in $(...) values and run files.
+[ "$(jq -nr '"a"' 2>/dev/null)" = a ] || { command jq -b -n . >/dev/null 2>&1 && jq() { command jq -b "$@"; }; }
+# Run a command with a time limit; rc 142 on timeout (GNU timeout says 124). No timeout(1) on stock macOS: perl alarm there.
+tlimit() {
+  local t=$1 r; shift
+  if command -v timeout >/dev/null && timeout 5 true 2>/dev/null; then
+    timeout "$t" "$@"; r=$?; [ $r -eq 124 ] && r=142; return $r
+  fi
+  perl -e 'alarm shift; exec @ARGV' "$t" "$@"
+}
 
 usage() { echo "usage: cw scout|coder [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task" >&2; exit 2; }
 role=${1:-}; shift || true
@@ -35,7 +45,7 @@ spec=$task
 
 # Inline files with code, so the worker spends no tool turns (each turn resends the whole context) reading them.
 for f in "${files[@]+"${files[@]}"}"; do
-  p=$f; [ "${p#/}" = "$p" ] && p=$dir/$f
+  case $f in /*|[A-Za-z]:[/\\]*) p=$f ;; *) p=$dir/$f ;; esac   # absolute: POSIX or drive letter
   [ -f "$p" ] || { echo "cw: no such file: $f" >&2; exit 2; }
   task+=$'\n\n'"<file path=\"$f\">"$'\n'"$(cat "$p")"$'\n</file>'
 done
@@ -58,11 +68,16 @@ else
     "Bash(git checkout *)","Bash(git restore *)","Bash(git stash *)","Bash(git rebase *)","Bash(git branch -D *)","Bash(git worktree *)",
     "Bash(brew *)","Bash(npm install -g *)","Bash(pip install *)","Bash(pip3 install *)","Bash(uv tool *)","Bash(sh)","Bash(bash)","Bash(zsh)",
     "Bash(launchctl *)","Bash(osascript *)","Bash(defaults write *)","Bash(open *)","Bash(crontab *)",
-    "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)"]'
+    "Bash(taskkill *)","Bash(powershell*)","Bash(pwsh*)","Bash(cmd *)","Bash(cmd.exe*)","Bash(reg add *)","Bash(reg delete *)","Bash(reg import *)","Bash(reg.exe *)",
+    "Bash(*Remove-Item*)","Bash(rd *)","Bash(del *)","Bash(rmdir /s*)","Bash(rmdir /S*)","Bash(rmdir //s*)","Bash(rmdir //S*)",
+    "Bash(schtasks*)","Bash(sc *)","Bash(sc.exe *)","Bash(setx *)","Bash(wsl*)","Bash(winget *)","Bash(choco *)","Bash(scoop *)",
+    "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)","Edit(~/AppData/**)","Write(~/AppData/**)"]'
   args=(--permission-mode auto --max-turns "${CW_MAX_TURNS:-80}" --allowedTools "Bash($here/cwkill *)"
         --disallowedTools "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(rm -rf*)"
         "Bash(pkill*)" "Bash(killall*)" "Bash(kill -1*)" "Bash(kill -9 -1*)" "Bash(kill -15 -1*)" "Bash(kill 0*)" "Bash(kill -- -*)" "Bash(kill -9 0*)" "Bash(kill -15 0*)" "Bash(kill -KILL *)" "Bash(kill -TERM -*)" "Bash(kill -s *)"
-        "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)")
+        "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)"
+        "Bash(taskkill*/im *)" "Bash(taskkill*/IM *)" "Bash(taskkill*/fi *)" "Bash(taskkill*/FI *)" "Bash(diskpart*)" "Bash(format *:*)" "Bash(format.com *)" "Bash(bcdedit*)"
+        "Bash(vssadmin *delete*)" "Bash(vssadmin *Delete*)" "Bash(vssadmin *DELETE*)" "Bash(cipher*/w*)" "Bash(cipher*/W*)")
 fi
 [ -n "$resume" ] && args+=(--resume "$resume")
 if [ ${#granted[@]} -gt 0 ]; then
@@ -125,7 +140,7 @@ scrub=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u C
 # --safe-mode drops CLAUDE.md, skills, plugins, hooks, MCP; --system-prompt replaces the ~2k default one.
 # Measured cold start: ~2.9k (scout) / ~3.4k (coder) tokens vs ~75k for a plain `claude -p`.
 # language=English: the user-level language setting survives safe mode; English reports are cheaper.
-# No timeout(1) on macOS; SIGALRM kills the worker (exit 142).
+# On timeout the worker dies and rc is 142 (see tlimit).
 # Live state for the cw-crew pane: .meta at start, one compact line per step in .events, rc in .done.
 title=$(printf '%s' "$task" | sed -n '/[^[:space:]]/{p;q;}' | cut -c1-160)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
@@ -143,7 +158,7 @@ ev='fromjson? |
   elif .type=="result" then {e:"result",ok:(.is_error|not),sub:.subtype,sid:.session_id,turns:.num_turns,
     denied:(.permission_denials|length),out:.usage.output_tokens}
   else empty end | .t=(now*1000|floor)'
-printf '%s' "$task" | (cd "$dir" && perl -e 'alarm shift; exec @ARGV' "$tmo" env "${scrub[@]}" \
+printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
   | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
@@ -169,6 +184,7 @@ q=$(jq -r '.result // ""' "$log.json" 2>/dev/null | sed -n 's/^[[:space:]*_>`-]*
 case $(printf '%s' "$q" | tr '[:upper:]' '[:lower:]') in none|none[.,:\ ]*|n/a*|-|"") q="" ;; esac   # "QUESTION: none." is not a question
 # PERMISSION: a denied call the lead must approve or refuse (rc 4). Also in .ask so the crew pane raises a hand.
 perm=$(jq -r '.result // ""' "$log.json" 2>/dev/null | sed -n 's/^[[:space:]*_>`-]*PERMISSION:[[:space:]*]*//p' | tail -1)
+case $(printf '%s' "$perm" | tr '[:upper:]' '[:lower:]') in none|none[.,:\ ]*|n/a*|-|"") perm="" ;; esac   # "PERMISSION: none needed." asks nothing
 [ -n "$perm" ] && q="PERMISSION: $perm"
 [ -n "$q" ] && printf '%s\n' "$q" > "$log.ask"
 secs=$(( $(date +%s) - start ))
@@ -182,7 +198,7 @@ acc=""
 if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$q" ]; then
   # .done waits for the acceptance run, so the crew pane shows the worker as "testing" meanwhile
   printf '{"e":"accept","t":%s}\n' "$(( $(date +%s) * 1000 ))" >> "$log.events"
-  (cd "$dir" && perl -e 'alarm shift; exec @ARGV' "${CW_ACCEPT_TMO:-1800}" bash -c "$accept") > "$log.accept" 2>&1
+  (cd "$dir" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$accept") > "$log.accept" 2>&1
   arc=$?
   if [ $arc -eq 0 ]; then acc=" accept=pass"; else
     acc=" accept=FAIL(rc=$arc)"

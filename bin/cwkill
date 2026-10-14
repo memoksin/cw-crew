@@ -5,8 +5,18 @@
 # Anything else is refused: ask the orchestrator with PERMISSION.
 [ $# -gt 0 ] || { echo "usage: cwkill PID..." >&2; exit 2; }
 
-ppid_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
-cmd_of() { ps -o command= -p "$1" 2>/dev/null; }
+if ps -o ppid= -p $$ >/dev/null 2>&1; then
+  ppid_of() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+  cmd_of() { ps -o command= -p "$1" 2>/dev/null; }
+else   # MSYS ps has no -o: read PPID and COMMAND from the table of `ps -p PID`; /proc has the full command line
+  # A row may start with a status letter (I, S, O) before the PID column; PPID is the field after the PID.
+  ppid_of() { ps -p "$1" 2>/dev/null | awk -v p="$1" 'NR > 1 { for (i = 1; i < NF; i++) if ($i == p) { print $(i + 1); exit } }'; }
+  cmd_of() {
+    if [ -r "/proc/$1/cmdline" ]; then tr '\0' ' ' < "/proc/$1/cmdline"
+    else ps -p "$1" 2>/dev/null | awk -v p="$1" 'NR > 1 { for (i = 1; i <= NF; i++) if (!k && $i == p) k = i
+      for (i = k + 6; i <= NF; i++) if ($i ~ /^(\/|[A-Za-z]:)/) { c = $i; for (j = i + 1; j <= NF; j++) c = c " " $j; print c; exit } }'; fi
+  }
+fi
 
 # This worker's cw process: nearest ancestor running the cw script.
 root=""; p=$PPID

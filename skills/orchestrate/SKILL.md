@@ -35,7 +35,7 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 
 ## Run
 
-The plugin puts `cw`, `cwgo`, `cwwait`, `cwls`, `cwopen`, `cwwt` and `cwkill` on the Bash PATH. If `command -v cw` finds nothing, call them as `${CLAUDE_SKILL_DIR}/../../bin/<name>`. Needs `claude`, `jq`, `perl`, `git`; macOS or Linux.
+The plugin puts `cw`, `cwgo`, `cwwait`, `cwls`, `cwopen`, `cwwt` and `cwkill` on the Bash PATH. If `command -v cw` finds nothing, call them as `${CLAUDE_SKILL_DIR}/../../bin/<name>`. Needs `claude`, `jq`, `perl`, `git`; macOS, Linux or Windows (Git for Windows' Git Bash plus `jq`: `winget install jqlang.jq`).
 
 ```sh
 cw scout|coder [-C dir] [-W name] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
@@ -57,6 +57,7 @@ cwgo NAME2 coder -r <sid> <<< "Fix: ..."                           # resume in t
 cwwait        # (run_in_background) fires when ANY fleet worker finishes; prints meta + report; marks it reviewed
 cwls          # table: running / done / QUESTION / PERMISSION / TIMEOUT / ACCEPT_FAIL, time, turns, sid
 cwopen        # unanswered QUESTION / PERMISSION requests (answered = resumed after the ask)
+cwopen -x NAME  # close a request you settled without a resume (did it yourself, or a false alarm); the pane lowers the hand
 ```
 
 - Every `cwwait` notification ends with the open requests. Answer them before anything else.

@@ -1,8 +1,10 @@
 #!/bin/bash
 # cwopen   list fleet workers whose QUESTION / PERMISSION has not been answered yet.
-#          Answered = some cw run resumed that session (its .meta has "resume":"<sid>").
+#          Answered = some cw run resumed that session (its .meta has "resume":"<sid>"), or the lead closed it.
 #          Prints one line per open request; exit 0 if any are open, 1 if none.
-# cwopen -q SID [ASK_FILE]   exit 0 if SID was resumed (after ASK_FILE was written; used by cwls).
+# cwopen -x NAME...   close requests the lead settled without a resume (renames the run's .ask to .closed;
+#          the crew pane lowers the hand).
+# cwopen -q SID [ERR_FILE]   exit 0 if SID was resumed after ERR_FILE was written, or closed (used by cwls).
 logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}
 # $1 sid, $2 file written when the question was asked: only a resume started after it counts
 answered() {
@@ -12,8 +14,22 @@ answered() {
   done
   return 1
 }
-if [ "${1:-}" = -q ]; then answered "$2" "${3:-}"; exit; fi
+# $1 fleet .err file -> the run's .ask file (from the meta line's log=)
+ask_of() { local l; l=$(grep -E '^\[cw (scout|coder) ' "$1" | tail -1 | sed -nE 's/.* log=(.+)\.json\]$/\1/p'); [ -n "$l" ] && echo "$l.ask"; }
+closed() { local a; a=$(ask_of "$1"); [ -n "$a" ] && [ ! -e "$a" ]; }
+if [ "${1:-}" = -q ]; then answered "$2" "${3:-}" || { [ -n "${3:-}" ] && closed "$3"; }; exit; fi
 fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
+if [ "${1:-}" = -x ]; then
+  shift; [ $# -gt 0 ] || { echo "usage: cwopen -x NAME..." >&2; exit 2; }
+  rc=0
+  for n in "$@"; do
+    a=$(ask_of "$fleet/$n.err" 2>/dev/null)
+    if [ -z "$a" ]; then echo "cwopen: no finished worker $n" >&2; rc=1
+    elif [ -e "$a" ]; then mv "$a" "${a%.ask}.closed" && echo "cwopen: closed $n"
+    else echo "cwopen: $n has no open request"; fi
+  done
+  exit $rc
+fi
 [ -d "$fleet" ] || exit 1
 open=1
 for f in "$fleet"/*.err; do
@@ -22,6 +38,7 @@ for f in "$fleet"/*.err; do
   [ -n "$line" ] || continue
   sid=$(sed -nE 's/.* sid=([^ ]+) .*/\1/p' <<< "$line")
   [ -n "$sid" ] && answered "$sid" "$f" && continue
+  closed "$f" && continue
   echo "OPEN $(basename "$f" .err): ${line:0:400}"
   open=0
 done

@@ -42,3 +42,61 @@ for (const surface of ['terminal', 'desktop'] as const) test(`${surface}: the cr
   await ui.press({ key: 'back' })
   expect(await ui.find({ key: 'open-a' })).toBeDefined()
 })
+
+test('windows: with only USERPROFILE set the pane reads runs from ~/.claude/cw-runs', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { USERPROFILE: 'C:\\Users\\x' })
+  const listed: string[] = []
+  on('fs.list', async (_$, e) => {
+    listed.push(e.path)
+    return { value: Object.entries(FILES).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) } as never
+  })
+  on('fs.read', async (_$, e) => {
+    if (e.path.includes('/frames/')) return { value: { base64: 'UE5H' } } as never
+    const name = e.path.slice(e.path.lastIndexOf('/') + 1)
+    if (!(name in FILES) || !e.path.includes('C:/Users/x/.claude/cw-runs/')) return { deny: `no ${e.path}` } as never
+    return { value: FILES[name] } as never
+  })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.status', 'ui.toast', 'ui.log'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  on('ui.blit', async () => ({ value: {} }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  // A non-Windows host resolves C:/ as relative to the cwd, so match the tail.
+  expect(listed[0]?.endsWith('C:/Users/x/.claude/cw-runs')).toBe(true)
+  const ui = await $.ui.mount({
+    plugin: 'cw-crew', surface: 'terminal', component: 'Pane', requestId: 'cw-crew',
+    props: { title: 'Crew', isFocused: false, bodyColumns: 60, placement: 'dock' } as never,
+  })
+  await ui.drawn()
+  expect(await ui.find({ key: 'open-a' })).toBeDefined()
+})
+
+test('a request the lead closed (cwopen -x renames .ask) lowers the hand', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const files: Record<string, string> = {
+    ...FILES, 'a.done': '0', 'a.ask': 'PERMISSION: Bash(rm x)',
+    'a.events': `${FILES['a.events']}{"e":"result","ok":true,"sub":"success","sid":"sid-a","turns":2,"denied":1,"out":10,"t":1791799990000}\n`,
+  }
+  on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.read', async (_$, e) => {
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  const status: (string | undefined)[] = []
+  on('ui.status', async (_$, e) => { status.push((e as { text?: string }).text); return { value: undefined } as never })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.toast', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  expect(status.at(-1)).toMatch(/waiting for an answer/)
+  delete files['a.ask']
+  files['a.closed'] = 'PERMISSION: Bash(rm x)'
+  await clock.advance(500)
+  expect(status.at(-1)).toBeUndefined()
+})

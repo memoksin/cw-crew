@@ -95,6 +95,6 @@ rm)
   git -C "$repo" branch -D "wt/$name" >/dev/null 2>&1
   rm -f "$basef"; echo "cwwt: removed $name"
   ;;
-list) git -C "$repo" worktree list | grep -F "$root/" || true ;;
+list) git -C "$repo" worktree list | grep -F "$(cygpath -m "$root" 2>/dev/null || echo "$root")/" || true ;;   # git prints C:/... on Windows
 *) die "unknown command $cmd" ;;
 esac

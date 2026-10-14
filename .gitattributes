@@ -1,0 +1,11 @@
+# Scripts and everything the plugin reads must keep LF on Windows checkouts (CRLF breaks bash).
+* text=auto eol=lf
+bin/* text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.py text eol=lf
+*.png binary
+frames/* binary

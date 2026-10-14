@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
+import { msysToWin, buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -291,4 +291,10 @@ test('sceneSvg never puts a space in a text run, so no surface can stretch one',
   expect(svg).toContain('textLength="6" lengthAdjust="spacingAndGlyphs">┃</text>')
   expect(svg).toContain('x="18" y="9.5" fill="#4fd1c5" textLength="6" lengthAdjust="spacingAndGlyphs">d</text>')
   expect(/<text[^>]*>[^<]* [^<]*<\/text>/.test(svg)).toBe(false)
+})
+
+test('msysToWin maps /c/... to C:/... and leaves other paths alone', () => {
+  expect(msysToWin('/c/Users/x/.claude/cw-runs')).toBe('C:/Users/x/.claude/cw-runs')
+  expect(msysToWin('/d')).toBe('D:')
+  for (const p of ['/Users/x', '/home/x', 'C:/Users/x', '/runs', '']) expect(msysToWin(p)).toBe(p)
 })

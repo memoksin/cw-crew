@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { FRAME_MS, frameFile, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, parseEvents, sceneRows, sceneSvg, SPRITE_COLS, SPRITE_ROWS,
+  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, msysToWin, parseEvents, sceneRows, sceneSvg, SPRITE_COLS, SPRITE_ROWS,
   type Meta, type Run, type State, type Worker,
 } from './scene'
 
@@ -73,7 +73,11 @@ async function poll($: EngineInterface) {
       const meta = metas.get(id)
       if (!meta) continue
       const run = runs.get(id) ?? { id, meta, events: [], size: -1, final: false }
-      if (run.final) continue
+      if (run.final) {
+        // The lead closed the request without a resume (cwopen -x): lower the hand.
+        if (run.question !== undefined && !byName.has(`${id}.ask`)) runs = new Map(runs).set(id, { ...run, question: undefined })
+        continue
+      }
       const ev = byName.get(`${id}.events`)
       const done = byName.get(`${id}.done`)
       let next: Tracked = run
@@ -192,7 +196,8 @@ async function paint($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     session = await $.session.id()
-    dir = (await $.env.get('CW_LOG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude/cw-runs`
+    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+    dir = msysToWin((await $.env.get('CW_LOG_DIR')) || `${home}/.claude/cw-runs`).replace(/\\/g, '/')
     await $.command.register({ name: 'crew', description: 'Open the cw worker pane (Haiku scouts / Sonnet coders)' })
     $.clock.every(400, () => void poll($).catch(err => $.ui.log(`cw-crew poll: ${String(err)}`)))
     $.clock.every(FRAME_MS, () => void paint($).catch(() => { mounted = undefined }))

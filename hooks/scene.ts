@@ -306,11 +306,14 @@ function wrap(s: string, width: number, lines: number): string[] {
   return out.slice(0, lines)
 }
 
+// MSYS path (/c/Users/x) -> C:/Users/x so $.fs can read it; other paths pass through.
+export const msysToWin = (p: string) => p.replace(/^\/([a-zA-Z])(?=\/|$)/, (_, d: string) => `${d.toUpperCase()}:`)
+
 // A path reads by its file name: the folders dim, the name bright. A command shows whole.
 function target(g: Grid, x: number, y: number, arg: string, max: number, bright: number, faint: number) {
   if (max < 2 || !arg) return 0
   const s = shorten(arg, max)
-  const cut = /\s/.test(arg.trim()) ? 0 : s.lastIndexOf('/') + 1
+  const cut = /\s/.test(arg.trim()) ? 0 : Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1
   const n = g.text(x, y, s.slice(0, cut), faint, max)
   return n + g.text(x + n, y, s.slice(cut), bright, max - n)
 }
