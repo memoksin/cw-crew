@@ -100,3 +100,27 @@ test('a request the lead closed (cwopen -x renames .ask) lowers the hand', async
   await clock.advance(500)
   expect(status.at(-1)).toBeUndefined()
 })
+
+test('a run whose heartbeat went stale (cw killed, no .done) stops counting as working, and comes back if it beats again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const files: Record<string, string> = { ...FILES, 'a.hb': '' }
+  let hbAt = NOW - 200_000
+  on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: name === 'a.hb' ? hbAt : NOW - 1000 })) }) as never)
+  on('fs.read', async (_$, e) => {
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  const status: (string | undefined)[] = []
+  on('ui.status', async (_$, e) => { status.push((e as { text?: string }).text); return { value: undefined } as never })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.toast', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  expect(status.some(s => s?.includes('working'))).toBe(false)
+  hbAt = NOW
+  await clock.advance(500)
+  expect(status.at(-1)).toMatch(/1 working/)
+})

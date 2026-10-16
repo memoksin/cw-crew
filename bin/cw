@@ -147,6 +147,8 @@ jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESS
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg name "${CW_NAME:-}" \
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep}' \
   > "$log.meta"
+# Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
+( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &
 ev='fromjson? |
   if .type=="system" and .subtype=="init" then {e:"init", sid:.session_id}
   elif .type=="assistant" then .message.content[]? |

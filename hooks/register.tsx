@@ -9,6 +9,9 @@ import {
 
 const PANE = 'cw-crew'
 const DAY = 86_400_000
+// cw touches <run>.hb every 30 s while its process lives: a staler one means cw was killed before .done.
+const STALE_MS = 90_000
+const DIED = 137
 const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
 const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
 const NOTES = 4, STEPS = 10, REPORT_CHARS = 2400
@@ -67,7 +70,9 @@ async function poll($: EngineInterface) {
         try { meta = text ? (JSON.parse(text) as Meta) : undefined } catch { meta = undefined }
         if (!meta) continue
         // A resumed/restarted lead gets a new session id: keep showing the workers still running from before.
-        const live = !byName.has(`${id}.done`) && now / 1000 - meta.start < (meta.tmo ?? 3600) + 2400   // + cw's acceptance run
+        const hb = byName.get(`${id}.hb`)
+        const live = !byName.has(`${id}.done`) && (hb ? now - hb.mtimeMs < STALE_MS
+          : now / 1000 - meta.start < (meta.tmo ?? 3600) + 2400)   // no .hb (older cw): + cw's acceptance run
         metas.set(id, meta.session === session || live ? meta : null)
       }
       const meta = metas.get(id)
@@ -89,6 +94,11 @@ async function poll($: EngineInterface) {
         const rc = Number.parseInt((await readText($, done.name)) ?? '', 10)
         const question = byName.has(`${id}.ask`) ? (await readText($, `${id}.ask`))?.trim() : undefined
         next = { ...next, rc: Number.isNaN(rc) ? 1 : rc, doneAt: done.mtimeMs, question, final: true }
+      } else {
+        // Not final: a heartbeat that resumes (laptop woke up) brings the worker back.
+        const hb = byName.get(`${id}.hb`)
+        const died = !!hb && now - hb.mtimeMs > STALE_MS
+        if (died !== (next.rc === DIED)) next = died ? { ...next, rc: DIED, doneAt: hb.mtimeMs } : { ...next, rc: undefined, doneAt: undefined }
       }
       if (next !== run || !runs.has(id)) runs = new Map(runs).set(id, next)
     }
