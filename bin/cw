@@ -136,6 +136,8 @@ tree0=$(snap)
 scrub=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET
        -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_SESSION_ATTENDED
        -u CLAUDE_CODE_EXECPATH -u CLAUDE_PID -u CLAUDE_EFFORT)
+# cmux's claude shim drops ANTHROPIC_API_KEY (workers fall back to the subscription): call the real binary.
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd: -)
 
 # --safe-mode drops CLAUDE.md, skills, plugins, hooks, MCP; --system-prompt replaces the ~2k default one.
 # Measured cold start: ~2.9k (scout) / ~3.4k (coder) tokens vs ~75k for a plain `claude -p`.
