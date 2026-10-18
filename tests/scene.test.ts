@@ -52,6 +52,21 @@ test('a permission denial shows as blocked, then fades to thinking', async () =>
   expect(runState(run, T0 * 1000 + 9000).blocked).toBe(1)
 })
 
+test('a resume that replays the old result first keeps working', async () => {
+  const run: Run = {
+    id: 'r', meta: meta({ resume: 'sid-1', tmo: 7200 }),
+    events: [
+      { e: 'init', sid: 'sid-1', t: T0 * 1000 + 100 },
+      { e: 'result', ok: true, sub: 'success', sid: 'sid-1', turns: 0, t: T0 * 1000 + 101 },
+      { e: 'init', sid: 'sid-1', t: T0 * 1000 + 110 },
+      { e: 'tool', tool: 'Bash', arg: 'ls', t: T0 * 1000 + 3000 },
+    ],
+  }
+  const view = runState(run, T0 * 1000 + 600_000)
+  expect(view.end).toBe(undefined)
+  expect(view.state).toBe('read')
+})
+
 test('a run that died without a result is failed', async () => {
   const run: Run = { id: 'd', meta: meta({ tmo: 10 }), events: [{ e: 'init', t: T0 * 1000 }] }
   expect(runState(run, (T0 + 100) * 1000).state).toBe('failed')

@@ -68,6 +68,8 @@ export function runState(run: Run, now: number): RunView {
     } else if (ev.e === 'denied') { lastDenied = ev; blocked++ }
     else if (ev.e === 'error') lastError = ev
     else if (ev.e === 'result') result = ev
+    // A resume replays the old session's result before its own init: only a result after the last init ends the run
+    else if (ev.e === 'init') result = undefined
     else if (ev.e === 'accept') accept = ev
     else if (ev.e === 'accept_end') accepted = ev
   }
