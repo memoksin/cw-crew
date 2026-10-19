@@ -3,9 +3,10 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { FRAME_MS, frameFile, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, clock, DETAILS, drawScene, encode, isActive, isVisible, LABEL, msysToWin, parseEvents, sceneRows, sceneSvg, SPRITE_COLS, SPRITE_ROWS,
-  type Meta, type Run, type State, type Worker,
+  buildWorkers, CARD, clock, drawDetail, drawScene, encode, isActive, isVisible, LABEL, msysToWin, PANE as PANE_BG, parseEvents, sceneRows, sceneSvg,
+  SPRITE_COLS, SPRITE_ROWS, type Meta, type Run, type Spot, type State, type Totals, type Worker,
 } from './scene'
+import type { Tab } from '../types'
 
 const PANE = 'cw-crew'
 const DAY = 86_400_000
@@ -14,7 +15,11 @@ const STALE_MS = 90_000
 const DIED = 137
 const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
 const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
-const NOTES = 4, STEPS = 10, REPORT_CHARS = 2400
+const tab = atom({ plugin: 'cw-crew', key: 'tab' } as const, 'notes' as Tab)
+const TABS: Tab[] = ['notes', 'steps', 'report', 'test']
+const NOTES = 4, STEPS = 10, REPORT_CHARS = 2400, TEST_LINES = 20
+const css = (c: number) => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`
+const TEXT = '#e6e6f0', DIM = '#8a8fa3', GOOD = '#7bd88f', BAD = '#ff5c5c'
 type Tracked = Run & { size: number; final: boolean }
 
 // Module state: a reload starts it over and the next poll rebuilds it from the run files.
@@ -41,7 +46,12 @@ let svgKick = 0
 const pngs = new Map<string, string>()
 // Detail view: the open worker's live notes (its assistant text) and final report, refreshed by poll().
 let selKey = ''
-let detail: { key: string; size: number; notes: string[]; report?: string } = { key: '', size: -1, notes: [] }
+let detail: { key: string; size: number; notes: string[]; report?: string; test?: string } = { key: '', size: -1, notes: [] }
+let detailKick = 0
+// The lead's own spend and its 5-hour readings (session.measure), to weigh the crew's share of that limit.
+let leadCost = 0
+let five: { first: number; last: number } | undefined
+let totals: Totals = {}
 
 function readText($: EngineInterface, name: string) {
   return $.fs.read(`${dir}/${name}`).catch(() => undefined)
@@ -105,6 +115,11 @@ async function poll($: EngineInterface) {
 
     const all = buildWorkers([...runs.values()], now)
     announce($, all)
+    const spent = all.reduce((s, w) => s + (w.cost ?? 0), 0)
+    // Workers draw on the same account: the 5-hour window moved by this much since the session began,
+    // and the crew's part of it is taken as its part of the money spent.
+    const moved = five ? five.last - five.first : 0
+    totals = { cost: spent || undefined, limit: spent && moved > 0 ? (moved * spent) / (spent + leadCost) : undefined }
     const visible = all.filter(w => isVisible(w, now))
     const grew = visible.length !== workers.length
     workers = visible
@@ -125,7 +140,11 @@ async function poll($: EngineInterface) {
     if (!mounted && opened && now - lastKick > 2000) { lastKick = now; $.ui.invalidate('ui.render') }
     // ponytail: whole-Svg redraw per poll, no per-frame blit there; fine for a handful of workers.
     else if (!selKey && now - svgAt < 5000 && now - svgKick >= (active ? 400 : 2000)) { svgKick = now; $.ui.invalidate('ui.render') }
-    if (selKey) await refreshDetail($, all, byName)
+    if (selKey) {
+      await refreshDetail($, all, byName)
+      // The limits tick with the clock: redraw a live worker's detail view each second.
+      if (all.some(w => w.key === selKey && isActive(w)) && now - detailKick >= 1000) { detailKick = now; $.ui.invalidate('ui.render') }
+    }
   } finally {
     polling = false
   }
@@ -146,11 +165,12 @@ async function refreshDetail($: EngineInterface, all: Worker[], byName: Map<stri
       for (const c of m.message?.content ?? []) if (c.type === 'text' && c.text?.trim()) notes.push(c.text.trim())
     } catch { /* a line still being written */ }
   }
-  let report: string | undefined
+  let report: string | undefined, test: string | undefined
   if (w.end !== undefined) {
     try { report = ((JSON.parse((await readText($, `${id}.json`)) ?? '{}') as { result?: string }).result ?? '').trim() } catch { report = '' }
+    test = (await readText($, `${id}.accept`))?.trimEnd().split('\n').slice(-TEST_LINES).join('\n')
   }
-  detail = { key: w.key, size, notes: notes.slice(-NOTES), report }
+  detail = { key: w.key, size, notes: notes.slice(-NOTES), report, test }
   $.ui.invalidate('ui.render')
 }
 
@@ -158,7 +178,39 @@ function openDetail($: EngineInterface, key: string) {
   selKey = key
   detail = { key: '', size: -1, notes: [] }
   mounted = undefined
+  const w = workers.find(x => x.key === key)
+  void update($, tab, () => (w?.end !== undefined ? 'report' : 'notes'))
   void update($, selected, () => key)
+}
+
+// Each tool step with how it came back: tool results follow their calls in order.
+function stepsOf(w: Worker) {
+  const out: { t: number; tool: string; arg: string; res?: string }[] = []
+  let next = 0
+  for (const ev of w.runIds.flatMap(id => runs.get(id)?.events ?? [])) {
+    if (ev.e === 'tool') out.push({ t: ev.t, tool: ev.tool ?? '', arg: ev.arg ?? '' })
+    else if ((ev.e === 'ok' || ev.e === 'error' || ev.e === 'denied') && out[next]) out[next++]!.res = ev.e
+    else if (ev.e === 'init') next = out.length
+  }
+  return out.slice(-STEPS)
+}
+
+// A drawn scene as one Svg, the sprites' PNG frames inlined; half-block pixels if a frame will not read.
+async function svgOf($: EngineInterface, draw: (images: boolean) => { rows: number; words: Uint32Array; spots: Spot[] }, cols: number) {
+  let { rows, words, spots } = draw(true)
+  const sprites = []
+  for (const s of spots) {
+    const file = frameFile(s.look)
+    let base64 = pngs.get(file)
+    if (base64 === undefined) {
+      base64 = await $.fs.read(`${$.plugin.root}/frames/${file}`, { as: 'bytes' }).then(r => r.base64, () => '')
+      pngs.set(file, base64)
+    }
+    if (base64) sprites.push({ x: s.x, y: s.y, base64 })
+  }
+  let svg = sceneSvg(words, cols, rows, sprites)
+  if (sprites.length < spots.length || svg.length > 131_072) { ({ rows, words } = draw(false)); svg = sceneSvg(words, cols, rows) }
+  return svg
 }
 
 // Ask for the rows the scene needs (room for two workers once any run), not the default third of the screen.
@@ -181,7 +233,7 @@ async function paint($: EngineInterface) {
   const at = mounted
   const root = $.plugin.root
   if (!at || sceneRows(workers.length, at.cols, at.maxRows) !== at.rows) return
-  const { words, spots } = drawScene(workers, at.cols, await $.clock.now(), at.maxRows, at.images)
+  const { words, spots } = drawScene(workers, at.cols, await $.clock.now(), at.maxRows, at.images, totals)
   const res = await $.ui.blit({ requestId: PANE, key: 'crew', cells: encode(words) })
   if (res.deny) { mounted = undefined; return }
   // The cells went in, so the pane is mounted: an Image refused now is one drawing its alt.
@@ -231,59 +283,96 @@ export const register: Register = on => {
     return { text: `Crew pane opened.${where}` }
   })
 
+  on('session.measure', async ($, e, next) => {
+    leadCost = e.cost?.usd ?? leadCost
+    const pct = e.rateLimits.find(r => r.kind === 'five_hour')?.percentUsed
+    // A drop means the window rolled over: count from there.
+    if (pct !== undefined) five = !five || pct < five.last ? { first: pct, last: pct } : { ...five, last: pct }
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, slots)
     const sel = await read($, selected)
     const open = sel ? workers.find(w => w.key === sel) : undefined
+    const terminal = e.surface === 'terminal'
     if (open) {
       mounted = undefined   // paint() must not blit the scene over the detail view
       const { Box, Text, Button } = $.ui.resolve(e)
       const now = await $.clock.now()
-      const steps = (open.runIds.flatMap(id => runs.get(id)?.events ?? [])).filter(ev => ev.tool).slice(-STEPS)
-      const ago = (t: number) => clock(Math.max(0, now - t))
-      return (
-        <Box flexDirection="column" paddingX={1}>
-          <Box flexDirection="row" gap={1}>
-            <Button key="back" hotkey="b" onPress={() => { selKey = ''; mounted = undefined; void update($, selected, () => '') }}>‹ back</Button>
-            <Text bold>{open.name}</Text>
-            <Text dimColor>{open.model} · {LABEL[open.state]} · {clock((open.end ?? now) - open.start)} · {open.turns} turns</Text>
+      const current = await read($, tab)
+      const cols = Math.max(46, Math.min(terminal ? 512 : 138, e.props.bodyColumns))
+      let hero
+      if (e.surface === 'terminal') {
+        const { Image, Raster } = $.ui.resolve(e)
+        const d = drawDetail(open, cols, now, images)
+        hero = (
+          <Box width={cols} height={d.rows}>
+            <Raster key="detail" columns={cols} rows={d.rows} cells={encode(d.words)} />
+            {d.spots.map(s => (
+              <Box position="absolute" top={s.y} left={s.x}>
+                <Image key={`d${s.key}`} source={imageSource(s.look, $.plugin.root)} columns={SPRITE_COLS} rows={SPRITE_ROWS} alt={s.alt} />
+              </Box>
+            ))}
           </Box>
-          {open.state === 'ask' && open.question && <Text color="warning" wrap="wrap">? {open.question}</Text>}
-          <Text bold>Task</Text>
-          <Text dimColor wrap="wrap">{open.task.slice(0, 600)}</Text>
-          <Text bold>Latest notes</Text>
-          {detail.key !== open.key ? <Text dimColor>reading…</Text>
-            : detail.notes.length === 0 ? <Text dimColor>no notes yet</Text>
-            : detail.notes.map(n => <Text wrap="wrap">· {n.slice(0, 400)}</Text>)}
-          <Text bold>Recent steps</Text>
-          {steps.length === 0 ? <Text dimColor>none yet</Text>
-            : steps.map(ev => <Text wrap="truncate-end"><Text dimColor>{ago(ev.t)} ago </Text>{ev.tool} {ev.arg ?? ''}</Text>)}
-          {detail.key === open.key && detail.report !== undefined && <Text bold>Report</Text>}
-          {detail.key === open.key && detail.report !== undefined &&
-            <Text wrap="wrap">{detail.report ? detail.report.slice(0, REPORT_CHARS) : 'no report (timed out or killed)'}</Text>}
+        )
+      } else {
+        const { Svg } = $.ui.resolve(e)
+        hero = <Svg key="detail" source={await svgOf($, im => drawDetail(open, cols, now, im), cols)} alt={`${open.name} ${LABEL[open.state]}`} />
+      }
+      const ago = (t: number) => clock(Math.max(0, now - t))
+      const ready = detail.key === open.key
+      const body =
+        current === 'notes' ? (!ready ? [<Text color={DIM}>reading…</Text>]
+          : detail.notes.length === 0 ? [<Text color={DIM}>no notes yet</Text>]
+          : detail.notes.map(n => <Text color={TEXT} wrap="wrap">{n.slice(0, 400)}</Text>))
+        : current === 'steps' ? (() => {
+          const steps = stepsOf(open)
+          return steps.length === 0 ? [<Text color={DIM}>none yet</Text>] : steps.map(st => (
+            <Text wrap="truncate-end">
+              <Text color={st.res === 'ok' ? GOOD : st.res ? BAD : DIM}>{st.res === 'ok' ? '✓' : st.res ? '✗' : '·'} </Text>
+              <Text color={DIM}>{ago(st.t).padStart(5)} </Text>
+              <Text color={TEXT}>{st.tool} </Text><Text color={DIM}>{st.arg}</Text>
+            </Text>
+          ))
+        })()
+        : current === 'report' ? [open.end === undefined ? <Text color={DIM}>still working</Text>
+          : !ready || detail.report === undefined ? <Text color={DIM}>reading…</Text>
+          : <Text color={TEXT} wrap="wrap">{detail.report ? detail.report.slice(0, REPORT_CHARS) : 'no report (timed out or killed)'}</Text>]
+        : [open.accept === undefined ? <Text color={DIM}>{open.end === undefined && open.state !== 'test' ? 'runs after the work' : 'no acceptance command'}</Text>
+          : <Text color={open.accept.ok ? GOOD : BAD}>{open.accept.ok ? '✓ passed' : `✗ failed${open.accept.rc !== undefined ? ` (rc ${open.accept.rc})` : ''}`}</Text>,
+          ...(ready && detail.test ? [<Text color={DIM} wrap="wrap">{detail.test}</Text>] : [])]
+      const resume = open.sid ? `cw ${open.role} -r ${open.sid}` : ''
+      return (
+        <Box flexDirection="column" backgroundColor={css(PANE_BG)} gap={1}>
+          <Box flexDirection="row" gap={1} paddingX={1}>
+            <Button key="back" hotkey="b" onPress={() => { selKey = ''; mounted = undefined; void update($, selected, () => '') }}>‹ back</Button>
+            {resume && <Button key="copy" hotkey="c" onPress={p => void $.ui.copy({ text: resume, surface: p.surface })
+              .then(r => $.ui.toast(r.isCopied ? `copied: ${resume}` : 'could not copy'))}>copy resume</Button>}
+          </Box>
+          {hero}
+          <Box flexDirection="column" paddingX={1}>
+            {open.state === 'ask' && open.question && <Text color="#ffe8a3" wrap="wrap">? {open.question}</Text>}
+            <Text color={DIM} wrap="wrap">{open.task.slice(0, 600)}</Text>
+          </Box>
+          <Box flexDirection="row" gap={2} paddingX={1}>
+            {TABS.map(t => (
+              <Button key={`tab-${t}`} plain onPress={() => void update($, tab, () => t)}>
+                <Text color={t === current ? TEXT : DIM} bold={t === current} underline={t === current}>{t}</Text>
+              </Button>
+            ))}
+          </Box>
+          <Box flexDirection="column" paddingX={1}>{body}</Box>
         </Box>
       )
     }
     if (sel) { selKey = ''; void update($, selected, () => '') }   // the worker left the crew
-    if (e.surface !== 'terminal') {
-      const { Box, Text, Button, Svg } = $.ui.resolve(e)
+    if (!terminal) {
+      const { Box, Button, Svg, Text } = $.ui.resolve(e)
       const now = await $.clock.now()
       svgAt = now
       const cols = Math.max(46, Math.min(138, e.props.bodyColumns))
-      let { rows, words, spots } = drawScene(workers, cols, now, 256, true)
-      const sprites = []
-      for (const s of spots) {
-        const file = frameFile(s.look)
-        let base64 = pngs.get(file)
-        if (base64 === undefined) {
-          base64 = await $.fs.read(`${$.plugin.root}/frames/${file}`, { as: 'bytes' }).then(r => r.base64, () => '')
-          pngs.set(file, base64)
-        }
-        if (base64) sprites.push({ x: s.x, y: s.y, base64 })
-      }
-      let svg = sceneSvg(words, cols, rows, sprites)
-      // A frame that would not read, or too many sprites for one Svg: half-block pixels instead.
-      if (sprites.length < spots.length || svg.length > 131_072) { ({ rows, words } = drawScene(workers, cols, now, 256, false)); svg = sceneSvg(words, cols, rows) }
+      const svg = await svgOf($, im => drawScene(workers, cols, now, 256, im, totals), cols)
       const alt = workers.length ? workers.map(w => `${w.name} ${w.role} ${LABEL[w.state]}`).join(', ') : 'no workers'
       return (
         <Box flexDirection="column" gap={1}>
@@ -291,25 +380,27 @@ export const register: Register = on => {
             : workers.map(w => <Text>{w.name} · {w.role} · {LABEL[w.state]}</Text>)}
           {workers.length > 0 && (
             <Box flexDirection="row" gap={1} flexWrap="wrap">
-              {workers.map(w => <Button key={`open-${w.key}`} onPress={() => openDetail($, w.key)}>{w.name} {DETAILS}</Button>)}
+              {workers.map(w => <Button key={`open-${w.key}`} onPress={() => openDetail($, w.key)}>{w.name} ›</Button>)}
             </Box>
           )}
         </Box>
       )
     }
-    const { Box, Button, Image, Raster } = $.ui.resolve(e)
+    const { Box, Button, Image, Raster, Text } = $.ui.resolve(e)
     const cols = Math.max(24, Math.min(512, e.props.bodyColumns))
     // Draw every card, even past the pane's height: the engine scrolls a body taller than its window.
     // Only the 256-row hard cap still folds workers into one-line rows.
     const maxRows = 256
-    const { rows, words, spots, hits } = drawScene(workers, cols, await $.clock.now(), maxRows, images)
+    const { rows, words, spots, hits } = drawScene(workers, cols, await $.clock.now(), maxRows, images, totals)
     mounted = { cols, rows, maxRows, images, keys: new Set(spots.map(s => s.key)) }
     const raster = <Raster key="crew" columns={cols} rows={rows} cells={encode(words)} />
-    // A "details ›" Button on each card's bottom edge opens its detail view.
+    // Each card's name is a Button over the same text: a click opens its detail view.
     // Not `h`: JSX compiles to the global h(), which a parameter of that name would shadow.
     const buttons = hits.map(hit => (
       <Box position="absolute" top={hit.y} left={hit.x}>
-        <Button key={`open-${hit.key}`} plain dimColor onPress={() => openDetail($, hit.key)}>{DETAILS}</Button>
+        <Button key={`open-${hit.key}`} plain onPress={() => openDetail($, hit.key)}>
+          <Text color={css(hit.color)} backgroundColor={css(CARD)}>{hit.label}</Text>
+        </Button>
       </Box>
     ))
     if (!images) return <Box width={cols} height={rows}>{raster}{buttons}</Box>

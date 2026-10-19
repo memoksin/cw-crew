@@ -57,7 +57,8 @@ if [ "$role" = scout ]; then
   tools=Read,Bash; allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
     "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
   [ -n "$web" ] && { tools+=,WebFetch,WebSearch; allow+=(WebFetch WebSearch); }
-  args=(--permission-mode dontAsk --max-turns 40 --allowedTools "${allow[@]}")
+  maxt=40
+  args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
 else
   model=${CW_CODER_MODEL:-claude-sonnet-5-5}
   sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never git commit, push, reset or clean, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed, commands run with results, open issues."
@@ -72,7 +73,8 @@ else
     "Bash(*Remove-Item*)","Bash(rd *)","Bash(del *)","Bash(rmdir /s*)","Bash(rmdir /S*)","Bash(rmdir //s*)","Bash(rmdir //S*)",
     "Bash(schtasks*)","Bash(sc *)","Bash(sc.exe *)","Bash(setx *)","Bash(wsl*)","Bash(winget *)","Bash(choco *)","Bash(scoop *)",
     "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)","Edit(~/AppData/**)","Write(~/AppData/**)"]'
-  args=(--permission-mode auto --max-turns "${CW_MAX_TURNS:-80}" --allowedTools "Bash($here/cwkill *)"
+  maxt=${CW_MAX_TURNS:-80}
+  args=(--permission-mode auto --max-turns "$maxt" --allowedTools "Bash($here/cwkill *)"
         --disallowedTools "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(rm -rf*)"
         "Bash(pkill*)" "Bash(killall*)" "Bash(kill -1*)" "Bash(kill -9 -1*)" "Bash(kill -15 -1*)" "Bash(kill 0*)" "Bash(kill -- -*)" "Bash(kill -9 0*)" "Bash(kill -15 0*)" "Bash(kill -KILL *)" "Bash(kill -TERM -*)" "Bash(kill -s *)"
         "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)"
@@ -145,22 +147,28 @@ PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd:
 # On timeout the worker dies and rc is 142 (see tlimit).
 # Live state for the cw-crew pane: .meta at start, one compact line per step in .events, rc in .done.
 title=$(printf '%s' "$task" | sed -n '/[^[:space:]]/{p;q;}' | cut -c1-160)
+branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg name "${CW_NAME:-}" \
-  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep}' \
+  --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
+  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}' \
   > "$log.meta"
 # Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
 ( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &
 ev='fromjson? |
   if .type=="system" and .subtype=="init" then {e:"init", sid:.session_id}
-  elif .type=="assistant" then .message.content[]? |
-    if .type=="tool_use" then {e:"tool",tool:.name,
+  elif .type=="assistant" then
+    (.message.usage // {} | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)) as $ctx
+    | (.message.id // "" | .[-8:]) as $mid | .message.content[]? |
+    (if .type=="tool_use" then {e:"tool",tool:.name,
       arg:((.input.file_path // .input.path // .input.command // .input.pattern // .input.query // .input.url // "")|tostring|.[0:120])}
-    elif .type=="thinking" then {e:"think"} elif .type=="text" then {e:"text"} else empty end
+    elif .type=="thinking" then {e:"think"} elif .type=="text" then {e:"text"} else empty end) | .ctx=$ctx | .mid=$mid
   elif .type=="user" then .message.content[]? | select(.type=="tool_result") |
     {e:(if .is_error then (if (.content|tostring|test("permission|denied|not allowed";"i")) then "denied" else "error" end) else "ok" end)}
   elif .type=="result" then {e:"result",ok:(.is_error|not),sub:.subtype,sid:.session_id,turns:.num_turns,
-    denied:(.permission_denials|length),out:.usage.output_tokens}
+    denied:(.permission_denials|length),out:.usage.output_tokens,cost:.total_cost_usd,
+    cin:.usage.cache_read_input_tokens,nin:((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
+    win:([.modelUsage[]?.contextWindow // empty] | max)}
   else empty end | .t=(now*1000|floor)'
 printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
@@ -169,19 +177,25 @@ printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" \
 rc=${PIPESTATUS[1]}
 jq -Rc 'fromjson? | select(.type=="result")' "$log.jsonl" | tail -1 > "$log.json"
 sid=$(jq -r '.session_id // empty' "$log.json" 2>/dev/null); [ -n "$sid" ] && printf '%s\n' "$dir" > "$logdir/dirs/$sid"
+# Lines this run changed (untracked files included), for the crew pane.
+tree1=$(snap)
+if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
+  git -C "$dir" diff --numstat "$tree0" "$tree1" 2>/dev/null | awk -v t="$(( $(date +%s) * 1000 ))" \
+    '{a+=$1; d+=$2; n++} END {printf "{\"e\":\"diff\",\"add\":%d,\"del\":%d,\"files\":%d,\"t\":%s}\n", a, d, n, t}' >> "$log.events"
+fi
 # Turn limit: resume the same session with a standard message instead of making the lead do it.
 # The note below is not a "[cw " line, so cwwait keeps waiting for the final one.
 # Only when the segment made progress: files changed and most tool calls did not fail. A worker that
 # loops on an error stops here with error_max_turns and the lead decides.
 left=${CW_AUTO_CONTINUE:-1}
 if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.subtype // ""' "$log.json")" = error_max_turns ] \
-   && [ "$(snap)" != "$tree0" ] \
+   && [ "$tree1" != "$tree0" ] \
    && jq -se '(map(select(.e=="error")) | length) * 2 < (map(select(.e=="ok" or .e=="error")) | length)' "$log.events" >/dev/null 2>&1; then
   # no .done for this segment: the crew pane would toast it as failed; the resumed run (same pid) carries on
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
   again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept")
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
-  CW_AUTO_CONTINUE=$((left - 1)) exec "$0" coder "${again[@]}" <<< "You hit the turn limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
+  CW_AUTO_CONTINUE=$((left - 1)) CW_CONT=1 exec "$0" coder "${again[@]}" <<< "You hit the turn limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
 fi
 # A worker that ends on QUESTION: waits to be resumed (-r sid) with the answer: rc 3, question in .ask.
 q=$(jq -r '.result // ""' "$log.json" 2>/dev/null | sed -n 's/^[[:space:]*_>`-]*QUESTION:[[:space:]*]*//p' | tail -1)
@@ -208,7 +222,7 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
     acc=" accept=FAIL(rc=$arc)"
     printf '\n--- acceptance FAILED (rc=%s): %s\n' "$arc" "$accept"; tail -20 "$log.accept"
   fi
-  printf '{"e":"accept_end","ok":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$(( $(date +%s) * 1000 ))" >> "$log.events"
+  printf '{"e":"accept_end","ok":%s,"rc":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
 fi
 echo "$rc" > "$log.done"
 [ -n "$wtname" ] && echo "[cw WT $wtname dir=$dir  merge: cwwt diff|apply|rm $wtname]" >&2

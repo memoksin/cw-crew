@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { msysToWin, buildWorkers, DETAILS, drawScene, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
+import { msysToWin, buildWorkers, DETAIL_ROWS, drawDetail, drawScene, gauges, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -149,7 +149,7 @@ test('a timed-out run chains its resume through the init sid; a renamed resume s
   expect(plain?.task).toBe('Camera assist')
 })
 
-test('each card gets a details button spot on its bottom edge, inside the card', async () => {
+test('each card gets a details button over its name, inside the card', async () => {
   const runs: Run[] = ['x', 'y'].map((id, i) => ({
     id, meta: meta({ role: 'coder', name: id, start: T0 + i }), events: [{ e: 'init', t: (T0 + i) * 1000 }],
   }))
@@ -161,7 +161,7 @@ test('each card gets a details button spot on its bottom edge, inside the card',
   expect(hits.map(h => h.key)).toEqual(ws.map(w => w.key))
   for (const h of hits) {
     expect(h.y).toBeLessThan(rows)
-    expect(h.x + DETAILS.length).toBeLessThan(cols)
+    expect(h.x + h.label.length).toBeLessThan(cols)
   }
 })
 
@@ -281,11 +281,55 @@ test('a card shows the activity strip, the quiet warning and a budget bar', asyn
   expect(ws[0]?.lastAt).toBe(T0 * 1000 + 3000)
   const { words } = drawScene(ws, 60, now)
   const text = String.fromCodePoint(...Array.from({ length: words.length / 3 }, (_, i) => words[i * 3] ?? 32))
-  expect(text.includes('sessiz')).toBe(true)
+  expect(text.includes('quiet')).toBe(true)
   expect(text.includes('▃') || text.includes('▂')).toBe(true)
-  // 80 s of a 100 s budget: the bar is amber
-  const B = 2 + 5, fg = (x: number) => words[(B * 60 + x) * 3 + 1]
-  expect(fg(2)).toBe(0xffb347)
+  // 80 s of a 100 s budget: the time limit is the closest one, red on the bottom edge and named on the card
+  expect(text.includes('time 0:20 left')).toBe(true)
+  const B = 2 + 5, i = (B * 60 + 2) * 3, fg = words[i + 1] ?? 0
+  expect(words[i]).toBe(0x2580)
+  expect([fg >> 16 > 0xd0, ((fg >> 8) & 255) < 0x70]).toEqual([true, true])
+})
+
+test('a finished coder carries its context, cost, cache, diff and test result through a resume', async () => {
+  const first: Run = {
+    id: 'f1', meta: meta({ role: 'coder', model: 'claude-sonnet-5-5', maxt: 80, wt: 'api', effort: 'medium', effort_src: 'jev', effort_p: 'l10 m70 h20' }), rc: 0,
+    events: [
+      { e: 'init', sid: 'sid-f', t: T0 * 1000 },
+      { e: 'tool', tool: 'Edit', arg: 'a.ts', ctx: 30_000, mid: 'm1', t: T0 * 1000 + 100 },
+      { e: 'tool', tool: 'Bash', arg: 'npm test', ctx: 42_000, mid: 'm2', t: T0 * 1000 + 200 },
+      { e: 'result', ok: true, sid: 'sid-f', turns: 2, out: 900, cost: 0.05, cin: 60_000, nin: 20_000, win: 200_000, t: T0 * 1000 + 300 },
+      { e: 'diff', add: 30, del: 4, files: 2, t: T0 * 1000 + 310 },
+      { e: 'accept_end', ok: false, rc: 1, t: T0 * 1000 + 400 },
+    ],
+  }
+  const live: Run = {
+    id: 'f2', meta: meta({ role: 'coder', model: 'claude-sonnet-5-5', resume: 'sid-f', start: T0 + 10, maxt: 80, cont: true }),
+    events: [{ e: 'init', sid: 'sid-f', t: (T0 + 10) * 1000 }, { e: 'tool', tool: 'Read', arg: 'b.ts', mid: 'm3', t: (T0 + 10) * 1000 + 50 }],
+  }
+  const [done] = buildWorkers([first], (T0 + 5) * 1000)
+  expect(done).toMatchObject({ ctx: 42_000, win: 200_000, cost: 0.05, cin: 60_000, add: 30, del: 4, files: 2, wt: 'api', effortSrc: 'jev', runTurns: 2 })
+  expect(done?.accept).toEqual({ ok: false, rc: 1 })
+  const g = gauges(done!, (T0 + 5) * 1000)
+  expect(g.map(x => x.name)).toEqual(['context', 'turns', 'time'])
+  expect(g[0]?.value).toBe('21%')
+  expect(g[1]?.value).toBe('2/80')
+  const [w] = buildWorkers([first, live], (T0 + 12) * 1000)
+  // the resume has no step with a context yet: the conversation's last one stands
+  expect(w).toMatchObject({ ctx: 42_000, runTurns: 1, conts: 1, cost: 0.05, add: 30 })
+  expect(w?.accept).toBeUndefined()
+  const { words, rows } = drawDetail(done!, 70, (T0 + 5) * 1000)
+  expect(rows).toBe(DETAIL_ROWS)
+  const text = String.fromCodePoint(...Array.from({ length: words.length / 3 }, (_, i) => words[i * 3] ?? 32))
+  for (const s of ['context', '42.0k / 200.0k', '2/80', '$0.05', 'cache 75%', 'jev 70%', 'api', '+30 −4 · 2 files', '✗ test']) expect(text).toContain(s)
+})
+
+test('the header sums the crew cost and shows its share of the 5-hour limit', () => {
+  const run: Run = { id: 'h', meta: meta(), rc: 0, events: [{ e: 'result', ok: true, sid: 's', turns: 1, cost: 0.42, t: T0 * 1000 + 100 }] }
+  const ws = buildWorkers([run], T0 * 1000 + 1000)
+  const { words } = drawScene(ws, 60, T0 * 1000 + 1000, 256, false, { cost: 0.42, limit: 3.2 })
+  const text = String.fromCodePoint(...Array.from({ length: 60 }, (_, i) => words[i * 3] ?? 32))
+  expect(text).toContain('$0.42')
+  expect(text).toContain('5h ~3%')
 })
 
 test('sceneSvg turns half-blocks into rects and text into text', () => {

@@ -6,7 +6,11 @@ Claude Code plugin. The main session (Opus) leads; cheap headless workers do the
 - **`cw` CLI** (`bin/`, on the Bash PATH) — starts one `claude -p` worker with a ~3k-token cold start.
   - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests).
   - Fleet tools: `cwgo` (background start), `cwwait` (notify on each finish), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`.
-- **Crew pane** — pixel-art side pane: each worker as a creature, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts. Click a card's `details ›` for its task, latest notes, recent steps and report; `‹ back` (or `b`) returns.
+- **Crew pane** — pixel-art side pane: each worker as a creature on its own card, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts.
+  - A card's bottom edge fills with the limit closest to running out (context, turns or time), coloured as [memobar](https://github.com/memoksin/memobar) colours usage: green under 50%, yellow to 80%, red from 80%. From 50% the card names it (`ctx 64%`).
+  - A finished card shows what it left: `+128 −14` lines, `✓ test` / `✗ test`, and its cost. `✦` after the effort pips: Jev chose the effort.
+  - The header counts the crew and sums its cost; `5h ~3%` estimates its share of the 5-hour limit (the window's rise since the session began, split by spend between lead and crew).
+  - Click a worker's name for its details: the three limits as bars, cost, cache hits, effort and branch, then `notes`, `steps`, `report` and `test` tabs. `c` copies its resume command, `b` goes back.
 
 ## Install
 
