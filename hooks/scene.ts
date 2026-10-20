@@ -282,7 +282,7 @@ const KIND_COLOR: Record<Kind, number> = { read: 0x64b5f6, write: 0xffb347, bash
 const EFFORT: Record<string, [number, number]> = { low: [1, 0x81c784], medium: [2, 0xffd166], high: [3, 0xff8a65] }
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // The pane paints its own background and each worker is a filled card on it. The sprite frames are
-// drawn on CARD, so an Image sits flush in its card whatever the terminal's theme.
+// transparent: an Image's box shows one colour even where the terminal letterboxes it (tall cells).
 export const PANE = 0x16171d, CARD = 0x20222b
 const TEXT = 0xe6e6f0, DIM = 0x8a8fa3, FAINT = 0x4d5162
 // Budgets read as memobar's do: under half green, to 80% yellow, from 80% red.
