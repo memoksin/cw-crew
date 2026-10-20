@@ -5,7 +5,7 @@ Claude Code plugin. The main session (Opus) leads; cheap headless workers do the
 - **`orchestrate` skill** — the playbook: scout → spec → coder → verify, fleets, permissions, cost rules.
 - **`cw` CLI** (`bin/`, on the Bash PATH) — starts one `claude -p` worker with a ~3k-token cold start.
   - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests).
-  - Fleet tools: `cwgo` (background start), `cwwait` (notify on each finish), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`.
+  - Fleet tools: `cwgo` (run one worker, notify when it finishes or asks), `cwwait` (recovery waiter), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`.
 - **Crew pane** — pixel-art side pane: each worker as a creature on its own card, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts.
   - A card's bottom edge fills with the limit closest to running out (context, turns or time), coloured as [memobar](https://github.com/memoksin/memobar) colours usage: green under 50%, yellow to 80%, red from 80%. From 50% the card names it (`ctx 64%`).
   - A finished card shows what it left: `+128 −14` lines, `✓ test` / `✗ test`, and its cost. `✦` after the effort pips: Jev chose the effort.
@@ -58,7 +58,8 @@ Ask Claude to delegate ("use workers", `/orchestrate`). By hand:
 ```sh
 cw scout -f src/app.ts <<< "List every caller of parseConfig with file:line."
 cwgo api coder -W api -T 'npm test' -- specs/common.md specs/api.md
-cwwait   # run in the background; fires when a worker finishes
+#   run cwgo in the background: it waits for its worker and prints the report or question
+cwwait   # recovery: fires when any unreported worker finishes (use with cwgo -d)
 ```
 
 ## Settings (env)
@@ -74,6 +75,7 @@ cwwait   # run in the background; fires when a worker finishes
 | `CW_JEV` | 0 | `1` = Jev (OpenRouter) picks worker effort per task. **Sends the first 20k characters of each task to OpenRouter.** Off: role default (scout low, coder medium) |
 | `OPENROUTER_API_KEY` / `CW_JEV_KEYCHAIN` | — | key for `CW_JEV=1`; on macOS a keychain service name works instead of the env key |
 | `CW_KILL_ALLOW` | — | colon-separated command prefixes `cwkill` may also stop |
+| `CW_ACCEPT_FAIL_RE` | `^\s*(FAIL\b(?!:? *0\b)\|SCRIPT ERROR)` | Perl regex: a `-T` run that exits 0 but prints a matching line is `accept=FAIL(output)`. Empty turns it off |
 
 Set them in `~/.claude/settings.json` under `env`.
 

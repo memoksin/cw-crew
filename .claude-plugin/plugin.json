@@ -1,9 +1,18 @@
 {
   "name": "cw-crew",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Orchestrate lean headless Claude workers (Haiku scouts, Sonnet coders) with the cw CLI, and watch them live in a pixel-art side pane",
-  "author": { "name": "Mehmet Yiğit Keskin" },
+  "author": {
+    "name": "Mehmet Yiğit Keskin"
+  },
   "license": "MIT",
-  "keywords": ["orchestration", "workers", "headless", "pane", "haiku", "sonnet"],
+  "keywords": [
+    "orchestration",
+    "workers",
+    "headless",
+    "pane",
+    "haiku",
+    "sonnet"
+  ],
   "types": "./types/index.d.ts"
 }

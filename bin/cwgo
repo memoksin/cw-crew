@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# cwgo NAME ROLE [cw options...] [-- spec.md...]   start a cw worker in the background, as part of the fleet
+# cwgo [-d] NAME ROLE [cw options...] [-- spec.md...]   start a cw worker as part of the fleet and wait for it
+#   Run it with run_in_background: the notification carries the report, or the worker's QUESTION/PERMISSION.
+#   -d: start and return at once (then cwwait reports it).
 #   Task = the spec files joined in order (shared parts first), or stdin when no files are given.
 #   Files go to the fleet dir: NAME.task / .out / .err / .pid. A NAME already used gets .2, .3, ...
 #   Fleet dir: $CW_FLEET, default ~/.claude/cw-runs/fleet/<repo or dir name>.
@@ -8,7 +10,8 @@
 # Env (CW_CODER_MODEL, CW_MAX_TURNS, ...) passes through to cw.
 set -uo pipefail
 die() { echo "cwgo: $*" >&2; exit 2; }
-[ $# -ge 2 ] || die "usage: cwgo NAME scout|coder [cw options...] [-- spec.md...]"
+detach=0; [ "${1:-}" = -d ] && { detach=1; shift; }
+[ $# -ge 2 ] || die "usage: cwgo [-d] NAME scout|coder [cw options...] [-- spec.md...]"
 name=$1; shift
 case $name in *[!A-Za-z0-9._-]*) die "bad name: $name" ;; esac
 args=(); files=()
@@ -29,5 +32,15 @@ else
 fi
 [ -s "$fleet/$n.task" ] || die "empty task"
 CW_NAME=$n nohup "$(dirname "$0")/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
-echo $! > "$fleet/$n.pid"
-echo "started $n (pid $!) in $fleet"
+pid=$!
+echo $pid > "$fleet/$n.pid"
+echo "started $n (pid $pid) in $fleet"
+[ "$detach" = 1 ] && exit 0
+# Wait for this one worker, so a lead that ran cwgo in the background gets one notification per
+# worker, questions included. A single shared cwwait had to be restarted after every notification.
+wait "$pid"; rc=$?
+if grep -q '^\[cw ' "$fleet/$n.err"; then "$(dirname "$0")/cwwait" "$fleet/$n.err"
+else echo "=== DIED without a result: $n"; tail -5 "$fleet/$n.err"; fi
+touch "$fleet/$n.seen"
+case $rc in 3|4) echo; echo "=== OPEN REQUEST from $n: answer it now (resume: cwgo $n.fix ROLE -r <sid> <<< \"...\") or close it (cwopen -x $n)" ;; esac
+exit 0

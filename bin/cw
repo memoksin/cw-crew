@@ -50,10 +50,10 @@ for f in "${files[@]+"${files[@]}"}"; do
   task+=$'\n\n'"<file path=\"$f\">"$'\n'"$(cat "$p")"$'\n</file>'
 done
 
-report="Final message is your report: English, terse, max 15 lines. No code dumps unless asked. If a real ambiguity or a blocker stops you (a decision that is not yours, missing access, conflicting facts), stop and make the last line of your report: QUESTION: <one concrete question>. You will be resumed with the answer. If a tool call you need is denied by permissions, do not work around it with another command that has the same effect: stop and make the last line of your report: PERMISSION: <Tool>(<exact command or path>) -- <why the task needs it>. You will be resumed with APPROVED (that exact call is then allowed: run it exactly as written) or DENIED with a reason and an alternative."
+report="Final message is your report: English, terse, max 15 lines. No code dumps unless asked. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check. DONE only if every check the task asks for ran and passed; a FAIL line, a skipped check or a missed target means PARTIAL. Mark claims you did not check NOT CHECKED. The report must stand alone: never answer with 'my earlier report stands'. If a real ambiguity or a blocker stops you (a decision that is not yours, missing access, conflicting facts), stop and make the last line of your report: QUESTION: <one concrete question>. You will be resumed with the answer. If a denied call was only an extra check the task did not ask for, skip it and mark that gap NOT CHECKED. If a tool call the task needs is denied by permissions, do not retry it and do not work around it with another command that has the same effect: stop and make the last line of your report: PERMISSION: <Tool>(<exact command or path>) -- <why the task needs it>. You will be resumed with APPROVED (that exact call is then allowed: run it exactly as written) or DENIED with a reason and an alternative."
 if [ "$role" = scout ]; then
   model=${CW_SCOUT_MODEL:-claude-haiku-5-5}
-  sp="You are a read-only research worker for an orchestrator. Do only the task. Bash allows only read-only commands (rg, grep, fd, eza, ls, wc, head, tail, sed -n, git log/show/diff/status/blame); others are denied. Search with rg (or grep) and read only the lines you need. Files given inline are already read. Cite facts as file:line or URL; mark anything unverified. $report"
+  sp="You are a read-only research worker for an orchestrator. Do only the task. Bash allows only read-only commands (rg, grep, fd, eza, ls, wc, head, tail, sed -n, git log/show/diff/status/blame); others are denied. Search with rg (or grep) and read only the lines you need. Files given inline are already read. Cite facts as file:line or URL, only lines you read in this run; mark anything unverified. A 'none found' or 'complete' claim names the search command and its hit count. $report"
   tools=Read,Bash; allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
     "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
   [ -n "$web" ] && { tools+=,WebFetch,WebSearch; allow+=(WebFetch WebSearch); }
@@ -61,7 +61,7 @@ if [ "$role" = scout ]; then
   args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
 else
   model=${CW_CODER_MODEL:-claude-sonnet-5-5}
-  sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never git commit, push, reset or clean, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed, commands run with results, open issues."
+  sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never make a test pass by weakening it (raising a timeout, cap or threshold, dropping or rewriting an assertion): if a test looks wrong, keep it and say why, or ask. Never git commit, push, reset, clean, merge, cherry-pick, revert, am or pull, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed (also files outside the scope that a tool or import rewrote), commands run with results, test changes with before/after values, open issues."
   tools=Read,Edit,Write,Bash
   # Risky but sometimes needed: in -p mode an "ask" rule is a denial, which the worker turns into a
   # PERMISSION request for the lead (see SKILL.md). Hard-never actions stay in --disallowedTools.
@@ -75,7 +75,7 @@ else
     "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)","Edit(~/AppData/**)","Write(~/AppData/**)"]'
   maxt=${CW_MAX_TURNS:-80}
   args=(--permission-mode auto --max-turns "$maxt" --allowedTools "Bash($here/cwkill *)"
-        --disallowedTools "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(rm -rf*)"
+        --disallowedTools "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(git merge*)" "Bash(git cherry-pick*)" "Bash(git revert*)" "Bash(git am*)" "Bash(git pull*)" "Bash(rm -rf*)"
         "Bash(pkill*)" "Bash(killall*)" "Bash(kill -1*)" "Bash(kill -9 -1*)" "Bash(kill -15 -1*)" "Bash(kill 0*)" "Bash(kill -- -*)" "Bash(kill -9 0*)" "Bash(kill -15 0*)" "Bash(kill -KILL *)" "Bash(kill -TERM -*)" "Bash(kill -s *)"
         "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)"
         "Bash(taskkill*/im *)" "Bash(taskkill*/IM *)" "Bash(taskkill*/fi *)" "Bash(taskkill*/FI *)" "Bash(diskpart*)" "Bash(format *:*)" "Bash(format.com *)" "Bash(bcdedit*)"
@@ -217,10 +217,15 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
   # .done waits for the acceptance run, so the crew pane shows the worker as "testing" meanwhile
   printf '{"e":"accept","t":%s}\n' "$(( $(date +%s) * 1000 ))" >> "$log.events"
   (cd "$dir" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$accept") > "$log.accept" 2>&1
-  arc=$?
+  arc=$?; why="rc=$arc"
+  # Some runners (Godot) exit 0 when a test fails or does not load: failure lines count too. CW_ACCEPT_FAIL_RE= turns it off.
+  fre=${CW_ACCEPT_FAIL_RE-'^\s*(FAIL\b(?!:? *0\b)|SCRIPT ERROR)'}
+  if [ $arc -eq 0 ] && [ -n "$fre" ] && ! perl -e '$r = shift; while (<>) { exit 1 if /$r/ }' "$fre" "$log.accept"; then
+    arc=1; why=output
+  fi
   if [ $arc -eq 0 ]; then acc=" accept=pass"; else
-    acc=" accept=FAIL(rc=$arc)"
-    printf '\n--- acceptance FAILED (rc=%s): %s\n' "$arc" "$accept"; tail -20 "$log.accept"
+    acc=" accept=FAIL($why)"
+    printf '\n--- acceptance FAILED (%s): %s\n' "$why" "$accept"; tail -20 "$log.accept"
   fi
   printf '{"e":"accept_end","ok":%s,"rc":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
 fi
