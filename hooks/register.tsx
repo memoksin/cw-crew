@@ -310,7 +310,7 @@ export const register: Register = on => {
           <Box width={cols} height={d.rows}>
             <Raster key="detail" columns={cols} rows={d.rows} cells={encode(d.words)} />
             {d.spots.map(s => (
-              <Box position="absolute" top={s.y} left={s.x}>
+              <Box position="absolute" top={s.y} left={s.x} width={SPRITE_COLS} height={SPRITE_ROWS} backgroundColor={css(CARD)}>
                 <Image key={`d${s.key}`} source={imageSource(s.look, $.plugin.root)} columns={SPRITE_COLS} rows={SPRITE_ROWS} alt={s.alt} />
               </Box>
             ))}
@@ -410,7 +410,7 @@ export const register: Register = on => {
       <Box width={cols} height={rows}>
         {raster}
         {spots.map(s => (
-          <Box position="absolute" top={s.y} left={s.x}>
+          <Box position="absolute" top={s.y} left={s.x} width={SPRITE_COLS} height={SPRITE_ROWS} backgroundColor={css(CARD)}>
             <Image key={s.key} source={imageSource(s.look, $.plugin.root)} columns={SPRITE_COLS} rows={SPRITE_ROWS} alt={s.alt} />
           </Box>
         ))}

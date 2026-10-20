@@ -283,7 +283,7 @@ const EFFORT: Record<string, [number, number]> = { low: [1, 0x81c784], medium: [
 const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // The pane paints its own background and each worker is a filled card on it. The sprite frames are
 // transparent: an Image's box shows one colour even where the terminal letterboxes it (tall cells).
-export const PANE = 0x16171d, CARD = 0x20222b
+export const PANE = 0x111122, CARD = 0x222233
 const TEXT = 0xe6e6f0, DIM = 0x8a8fa3, FAINT = 0x4d5162
 // Budgets read as memobar's do: under half green, to 80% yellow, from 80% red.
 const GOOD = 0x7bd88f, WARN = 0xffd166, BAD = 0xff5c5c

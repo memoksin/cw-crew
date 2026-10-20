@@ -138,6 +138,8 @@ tree0=$(snap)
 scrub=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET
        -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_SESSION_ATTENDED
        -u CLAUDE_CODE_EXECPATH -u CLAUDE_PID -u CLAUDE_EFFORT)
+# Workers run tool commands in bash: the user's zsh snapshot brings aliases (ls -> eza --icons) that
+# change output and once hung a worker for 8 minutes.
 # cmux's claude shim drops ANTHROPIC_API_KEY (workers fall back to the subscription): call the real binary.
 PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd: -)
 
@@ -146,7 +148,7 @@ PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd:
 # language=English: the user-level language setting survives safe mode; English reports are cheaper.
 # On timeout the worker dies and rc is 142 (see tlimit).
 # Live state for the cw-crew pane: .meta at start, one compact line per step in .events, rc in .done.
-title=$(printf '%s' "$task" | sed -n '/[^[:space:]]/{p;q;}' | cut -c1-160)
+title=$(printf '%s' "$task" | perl -ne 's/^\s*(#+\s*)?(goal|task)\s*:?\s*//i; if (/\S/) { print; exit }' | cut -c1-160)
 branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg name "${CW_NAME:-}" \
@@ -155,6 +157,24 @@ jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESS
   > "$log.meta"
 # Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
 ( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &
+# A tool command that outlived its own timeout (e.g. blocked on a full pipe) keeps `claude -p` from
+# exiting after its result, so cw never wrote .json. Once the result is in, give claude CW_EXIT_GRACE
+# seconds, then stop the leftover processes under it (only this worker's own tree).
+( while kill -0 $$ 2>/dev/null && [ ! -e "$log.json" ]; do
+    sleep 5
+    tail -1 "$log.events" 2>/dev/null | grep -q '"e":"result"' || continue
+    sleep "${CW_EXIT_GRACE:-20}"
+    [ -s "$log.json" ] && break
+    tree=$(ps -A -o pid=,ppid=,command=)
+    c=$(awk -v r=$$ '{p[$1]=$2; if ($0 ~ /(^|[ \/])claude -p /) k[$1]=1}
+      END {for (x in k) {y=x; while ((y in p) && y != r) y=p[y]; if (y == r) print x}}' <<< "$tree" | head -1)
+    [ -n "$c" ] || break
+    kids=$(awk -v r="$c" '{p[$1]=$2} END {for (x in p) {y=p[x]; while ((y in p) && y != r) y=p[y]; if (y == r) print x}}' <<< "$tree")
+    echo "cw: claude did not exit ${CW_EXIT_GRACE:-20}s after its result; stopping leftover tool processes: $(echo $kids)" >> "$log.err"
+    [ -n "$kids" ] && kill $kids 2>/dev/null
+    sleep 5; kill -0 "$c" 2>/dev/null && kill "$c" 2>/dev/null
+    break
+  done ) </dev/null >/dev/null 2>&1 &
 ev='fromjson? |
   if .type=="system" and .subtype=="init" then {e:"init", sid:.session_id}
   elif .type=="assistant" then
@@ -170,7 +190,7 @@ ev='fromjson? |
     cin:.usage.cache_read_input_tokens,nin:((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
     win:([.modelUsage[]?.contextWindow // empty] | max)}
   else empty end | .t=(now*1000|floor)'
-printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" \
+printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" CLAUDE_CODE_SHELL="$(command -v bash)" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
   | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
