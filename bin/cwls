@@ -6,7 +6,7 @@ now=$(date +%s)
 for f in "$fleet"/*.err; do
   [ -e "$f" ] || continue
   base=${f%.err}; name=$(basename "$base")
-  meta=$(grep -E '^\[cw (scout|coder) ' "$f" | tail -1)
+  meta=$(grep -E '^\[cw (scout|coder|reviewer) ' "$f" | tail -1)
   if [ -n "$meta" ]; then
     state=done
     case $meta in *" rc=142 "*) state=TIMEOUT ;; *error_max_turns*) state=MAX_TURNS ;; *" rc=0 "*) ;; *) state=FAILED ;; esac

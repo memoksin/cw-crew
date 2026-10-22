@@ -62,6 +62,10 @@ wt=$("$here/bin/cwwt" create w1 2>/dev/null) && printf 'from worker\n' > "$wt/d.
 "$here/bin/cw" reviewer -W w1 <<< "x" >/dev/null 2>&1
 check "-W w1: the worktree's changes" 'grep -q "^+from worker" "$t/prompt" && grep -qF "worktree w1" "$t/prompt"'
 
+# Fleet: cwgo runs a reviewer, cwls reads its meta line.
+CW_FLEET=$t/fleet "$here/bin/cwgo" rv reviewer -W w1 <<< "x" >/dev/null 2>&1
+check "cwls shows a finished reviewer as done" 'CW_FLEET=$t/fleet "$here/bin/cwls" | grep -qE "^rv +done "'
+
 # Other roles keep their setup.
 "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
 check "scout unchanged: Haiku, low, read-only, 40 turns" 'arg claude-haiku-5-5 && arg low && arg Read,Bash && arg 40 && ! grep -q "<diff" "$t/prompt"'

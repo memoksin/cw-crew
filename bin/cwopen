@@ -15,7 +15,7 @@ answered() {
   return 1
 }
 # $1 fleet .err file -> the run's .ask file (from the meta line's log=)
-ask_of() { local l; l=$(grep -E '^\[cw (scout|coder) ' "$1" | tail -1 | sed -nE 's/.* log=(.+)\.json\]$/\1/p'); [ -n "$l" ] && echo "$l.ask"; }
+ask_of() { local l; l=$(grep -E '^\[cw (scout|coder|reviewer) ' "$1" | tail -1 | sed -nE 's/.* log=(.+)\.json\]$/\1/p'); [ -n "$l" ] && echo "$l.ask"; }
 closed() { local a; a=$(ask_of "$1"); [ -n "$a" ] && [ ! -e "$a" ]; }
 if [ "${1:-}" = -q ]; then answered "$2" "${3:-}" || { [ -n "${3:-}" ] && closed "$3"; }; exit; fi
 fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
