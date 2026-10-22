@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cw — run one headless Claude worker. Task on stdin, report on stdout, one meta line on stderr.
-#   cw scout|coder [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task.md
+#   cw scout|coder|reviewer [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task.md
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
@@ -8,6 +8,8 @@
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
+#   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
+#     -B ref = changes since the merge base with ref, else uncommitted changes (untracked included). -f = specs.
 # Whole body in one { } block: bash parses it all before running, so editing this file cannot break running workers.
 {
 set -uo pipefail
@@ -24,24 +26,33 @@ tlimit() {
   perl -e 'alarm shift; exec @ARGV' "$t" "$@"
 }
 
-usage() { echo "usage: cw scout|coder [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task" >&2; exit 2; }
+usage() { echo "usage: cw scout|coder|reviewer [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] < task" >&2; exit 2; }
 role=${1:-}; shift || true
-case $role in scout|coder) ;; *) usage ;; esac
-ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=()
-while getopts "C:r:t:wf:e:a:W:K:T:D:" o; do
-  case $o in C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; *) usage ;; esac
+case $role in scout|coder|reviewer) ;; *) usage ;; esac
+base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=()
+while getopts "C:r:t:wf:e:a:W:K:T:D:B:" o; do
+  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; *) usage ;; esac
 done
-[ -t 0 ] && { echo "cw: task must come on stdin" >&2; exit 2; }
-[ -n "$tmo" ] || { [ "$role" = coder ] && tmo=${CW_TIMEOUT:-3600} || tmo=${CW_TIMEOUT:-1200}; }   # coders get 60 min, scouts 20
-task=$(cat); [ -n "$task" ] || { echo "cw: empty task" >&2; exit 2; }
+[ "$role" = reviewer ] && [ -n "$web" ] && { echo "cw: reviewer has no web" >&2; exit 2; }
+[ -t 0 ] && [ "$role" != reviewer ] && { echo "cw: task must come on stdin" >&2; exit 2; }
+[ -n "$tmo" ] || { [ "$role" = coder ] && tmo=${CW_TIMEOUT:-3600} || tmo=${CW_TIMEOUT:-1200}; }   # coders get 60 min, scouts and reviewers 20
+task=""; [ -t 0 ] || task=$(cat)
+[ "$role" = reviewer ] && [ -z "$task" ] && task="Review the diff below."
+[ -n "$task" ] || { echo "cw: empty task" >&2; exit 2; }
 case $effort in auto|low|medium|high|xhigh|max) ;; *) usage ;; esac
 logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}; mkdir -p "$logdir/dirs"
-if [ -n "$wtname" ]; then
+if [ -n "$wtname" ] && [ "$role" = reviewer ]; then
+  dir=$(cd "$dir" && "$here/cwwt" path "$wtname") || { echo "cw: no worktree $wtname to review" >&2; exit 2; }
+elif [ -n "$wtname" ]; then
   dir=$(cd "$dir" && "$here/cwwt" create "$wtname" "${keep[@]+"${keep[@]}"}") || { echo "cw: worktree setup failed" >&2; exit 2; }
 elif [ -n "$resume" ] && [ -z "$dir_set" ] && [ -f "$logdir/dirs/$resume" ]; then
   dir=$(cat "$logdir/dirs/$resume")   # a resumed session must run where it ran before
 fi
 spec=$task
+# Tree snapshot of the work dir (tracked + untracked, no ignored), to tell real progress from looping.
+snap() { git -C "$dir" rev-parse -q --git-dir >/dev/null 2>&1 || return 0; local i; i=$(mktemp)
+  cp "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$i" 2>/dev/null
+  GIT_INDEX_FILE=$i git -C "$dir" add -A >/dev/null 2>&1; GIT_INDEX_FILE=$i git -C "$dir" write-tree 2>/dev/null; rm -f "$i"; }
 
 # Inline files with code, so the worker spends no tool turns (each turn resends the whole context) reading them.
 for f in "${files[@]+"${files[@]}"}"; do
@@ -50,14 +61,37 @@ for f in "${files[@]+"${files[@]}"}"; do
   task+=$'\n\n'"<file path=\"$f\">"$'\n'"$(cat "$p")"$'\n</file>'
 done
 
+# A reviewer gets its diff inline (a fresh run only; a resume already has it).
+if [ "$role" = reviewer ] && [ -z "$resume" ]; then
+  if [ -n "$wtname" ]; then d=$(cd "$dir" && "$here/cwwt" diff "$wtname") || exit 2; src="worktree $wtname"
+  else
+    git -C "$dir" rev-parse -q --git-dir >/dev/null 2>&1 || { echo "cw: reviewer needs a git repo" >&2; exit 2; }
+    from=HEAD; src="uncommitted changes"
+    [ -n "$base" ] && { from=$(git -C "$dir" merge-base "$base" HEAD) || { echo "cw: no merge base with $base" >&2; exit 2; }; src="changes since $base"; }
+    d=$(git -C "$dir" diff "$from" "$(snap)")
+  fi
+  [ -n "$d" ] || { echo "cw: nothing to review ($src)" >&2; exit 2; }
+  cap=${CW_REVIEW_MAX:-60000}
+  [ ${#d} -gt "$cap" ] && d="${d:0:$cap}"$'\n'"[diff cut at $cap chars: Read the remaining files yourself]"
+  task+=$'\n\n'"<diff of=\"$src\">"$'\n'"$d"$'\n</diff>'
+fi
+
 report="Final message is your report: English, terse, max 15 lines. No code dumps unless asked. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check. DONE only if every check the task asks for ran and passed; a FAIL line, a skipped check or a missed target means PARTIAL. Mark claims you did not check NOT CHECKED. The report must stand alone: never answer with 'my earlier report stands'. If a real ambiguity or a blocker stops you (a decision that is not yours, missing access, conflicting facts), stop and make the last line of your report: QUESTION: <one concrete question>. You will be resumed with the answer. If a denied call was only an extra check the task did not ask for, skip it and mark that gap NOT CHECKED. If a tool call the task needs is denied by permissions, do not retry it and do not work around it with another command that has the same effect: stop and make the last line of your report: PERMISSION: <Tool>(<exact command or path>) -- <why the task needs it>. You will be resumed with APPROVED (that exact call is then allowed: run it exactly as written) or DENIED with a reason and an alternative."
+# Scouts and reviewers: read-only Bash.
+ro_allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
+          "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
 if [ "$role" = scout ]; then
   model=${CW_SCOUT_MODEL:-claude-haiku-5-5}
   sp="You are a read-only research worker for an orchestrator. Do only the task. Bash allows only read-only commands (rg, grep, fd, eza, ls, wc, head, tail, sed -n, git log/show/diff/status/blame); others are denied. Search with rg (or grep) and read only the lines you need. Files given inline are already read. Cite facts as file:line or URL, only lines you read in this run; mark anything unverified. A 'none found' or 'complete' claim names the search command and its hit count. $report"
-  tools=Read,Bash; allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
-    "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
+  tools=Read,Bash; allow=("${ro_allow[@]}")
   [ -n "$web" ] && { tools+=,WebFetch,WebSearch; allow+=(WebFetch WebSearch); }
   maxt=40
+  args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
+elif [ "$role" = reviewer ]; then
+  model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5}
+  sp="You are a read-only code reviewer for an orchestrator. You did not write this change: judge the inline diff fresh against the task and any spec. Bash allows only read-only commands (rg, grep, ls, sed -n, git log/show/diff/blame); read only what you need to confirm a finding. Report real defects: wrong behavior, broken contract or spec rule, missing test for changed behavior, security. Skip style unless a spec asks for it. Report: English, max 15 lines, no praise. Line 1: 'DONE review: N blocker, M suggest' or 'DONE review: clean'; 'BLOCKED <why>' if you could not review. Then one line per finding: 'BLOCKER path:line - problem; fix' or 'SUGGEST path:line - ...'. Cite only lines you read; mark unchecked ones UNSURE. If a real ambiguity stops you, last line: QUESTION: <one question>."
+  tools=Read,Bash; allow=("${ro_allow[@]}")
+  maxt=20
   args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
 else
   model=${CW_CODER_MODEL:-claude-sonnet-5-5}
@@ -98,7 +132,7 @@ fi
 # Off or any failure: the role default.
 effort_src=flag; effort_p=""
 if [ "$effort" = auto ]; then
-  [ "$role" = scout ] && effort=low || effort=medium
+  [ "$role" = coder ] && effort=medium || effort=low
   effort_src=default
   prev=""
   [ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
@@ -108,7 +142,7 @@ if [ "$effort" = auto ]; then
     req=$(jq -nc --arg m "${CW_JEV_MODEL:-typesafe/jev-1.13}" --arg role "$role" --arg spec "${spec:0:20000}" \
       --arg files "${files[*]+"${files[*]}"}" '{model: $m,
       state: {worker_role: $role,
-        worker_model: (if $role == "scout" then "Claude Haiku (read-only research)" else "Claude Sonnet (writes code, runs tests)" end),
+        worker_model: (if $role == "scout" then "Claude Haiku (read-only research)" elif $role == "reviewer" then "Claude Sonnet (read-only diff review)" else "Claude Sonnet (writes code, runs tests)" end),
         files_given: $files, task_spec: $spec},
       questions: {effort: {type: "choice",
         instructions: "How much reasoning effort should this headless worker get to finish `task_spec` correctly on the first try? Higher effort costs 2-4x more tokens and time, so pick the lowest level that is still likely to succeed.",
@@ -129,10 +163,6 @@ fi
 args+=(--effort "$effort" "${adddirs[@]+"${adddirs[@]}"}")
 log="$logdir/$(date +%Y%m%d-%H%M%S)-$role-$$"
 start=$(date +%s)
-# Tree snapshot of the work dir (tracked + untracked, no ignored), to tell real progress from looping.
-snap() { git -C "$dir" rev-parse -q --git-dir >/dev/null 2>&1 || return 0; local i; i=$(mktemp)
-  cp "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$i" 2>/dev/null
-  GIT_INDEX_FILE=$i git -C "$dir" add -A >/dev/null 2>&1; GIT_INDEX_FILE=$i git -C "$dir" write-tree 2>/dev/null; rm -f "$i"; }
 tree0=$(snap)
 # Nested launches inherit the parent session's vars and can hang or refuse to start.
 scrub=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET
