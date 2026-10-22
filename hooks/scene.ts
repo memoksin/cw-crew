@@ -3,7 +3,7 @@
 
 import { CLEAR, FRAME_MS, SMALL_H, SMALL_W, lookAt, smallSprite, type Canvas, type Look } from './creatures'
 
-export type Role = 'scout' | 'coder'
+export type Role = 'scout' | 'coder' | 'reviewer'
 export type Kind = 'read' | 'write' | 'bash' | 'web'
 export type State =
   | 'boot' | 'resumed' | 'think' | Kind | 'test' | 'blocked' | 'error' | 'ask' | 'done' | 'failed'
@@ -41,6 +41,7 @@ export type Worker = {
 const NAMES: Record<Role, string[]> = {
   scout: ['KIRI', 'SORA', 'MOCHI', 'YUZU', 'HOSHI', 'NORI', 'TOFU', 'MISO', 'KOJI', 'UME'],
   coder: ['BOLT', 'RIVET', 'PIXEL', 'FORGE', 'GIZMO', 'BYTE', 'FLUX', 'SPARK', 'COG', 'WELD'],
+  reviewer: ['LENS', 'OPAL', 'IRIS', 'SAGE', 'QUILL', 'PRISM', 'ONYX', 'JADE', 'RUNE', 'ECHO'],
 }
 
 const READ_CMD = /^\s*(rg|fd|eza|ls|wc|head|tail|cat|bat|grep|find|sed -n|git (log|show|diff|status|blame))\b/
@@ -126,14 +127,14 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
   const sorted = [...runs].sort((a, b) => a.meta.start - b.meta.start || a.id.localeCompare(b.id))
   const bySid = new Map<string, Worker>()
   const workers: Worker[] = []
-  const used: Record<Role, number> = { scout: 0, coder: 0 }
+  const used: Record<Role, number> = { scout: 0, coder: 0, reviewer: 0 }
   // A live run learns its model's context window from any finished run of that model.
   const windows = new Map<string, number>()
   for (const run of sorted) for (const ev of run.events) if (ev.win) windows.set(run.meta.model, ev.win)
   for (const run of sorted) {
     const view = runState(run, now)
     const prev = run.meta.resume ? bySid.get(run.meta.resume) : undefined
-    const role = run.meta.role === 'coder' ? 'coder' : 'scout'
+    const role: Role = run.meta.role === 'coder' || run.meta.role === 'reviewer' ? run.meta.role : 'scout'
     // A resume started under its own fleet name (cwgo NAME -r sid) is a new job on the same creature:
     // show that name, task and clock, as cwls does.
     const renamed = !!prev && !!run.meta.name && run.meta.name !== prev.name
@@ -159,7 +160,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       effortSrc: run.meta.effort_src ?? '', effortP: run.meta.effort_p ?? '',
       branch: run.meta.branch || prev?.branch || '', wt: run.meta.wt || prev?.wt || '',
       sid: [...run.events].reverse().find(ev => ev.sid)?.sid ?? prev?.sid ?? '',
-      maxTurns: run.meta.maxt ?? (role === 'coder' ? 80 : 40),
+      maxTurns: run.meta.maxt ?? (role === 'coder' ? 80 : role === 'reviewer' ? 20 : 40),
       conts: (prev?.conts ?? 0) + (run.meta.cont ? 1 : 0),
       // A resume continues the same conversation: until its first step the context is the last run's.
       ctx: view.ctx || prev?.ctx || 0,
@@ -193,7 +194,7 @@ const DEF = 0x01000000
 // 15x8 half-block pixels (one pixel = one half-block, no scaling). Creature left, props right.
 const MW = SMALL_W, MH = SMALL_H / 2
 
-export const THEME: Record<Role, number> = { scout: 0x4fd1c5, coder: 0xffb347 }
+export const THEME: Record<Role, number> = { scout: 0x4fd1c5, coder: 0xffb347, reviewer: 0xff8fb8 }
 const OPUS_THEME = 0xb59cff
 
 const hash = (s: string) => {
@@ -597,12 +598,15 @@ export function drawScene(
   header(g, ws, now, totals)
   if (ws.length === 0) {
     panel(g, 0, HEADER_H, cols, EMPTY_H)
-    const half = Math.floor(cols / 2)
-    for (const [i, role] of (['scout', 'coder'] as Role[]).entries()) {
-      const cx = Math.max(0, (i ? half : 0) + Math.floor((half - MW) / 2))
-      place(lookAt(role, role === 'scout' ? 'haiku' : 'sonnet', 'sleep', now, 0, i * 5), cx, HEADER_H + 1, `${role} asleep`)
-      const label = role === 'scout' ? 'scout · haiku' : 'coder · sonnet'
-      g.text(Math.max(0, (i ? half : 0) + Math.floor((half - label.length) / 2)), HEADER_H + 1 + MH, label, dim(THEME[role], 0.8))
+    // The reviewer joins when its label fits a third of the pane.
+    const crew: Role[] = cols >= 60 ? ['scout', 'coder', 'reviewer'] : ['scout', 'coder']
+    const slot = Math.floor(cols / crew.length)
+    for (const [i, role] of crew.entries()) {
+      const model = role === 'scout' ? 'haiku' : 'sonnet'
+      const cx = Math.max(0, i * slot + Math.floor((slot - MW) / 2))
+      place(lookAt(role, model, 'sleep', now, 0, i * 5), cx, HEADER_H + 1, `${role} asleep`)
+      const label = `${role} · ${model}`
+      g.text(Math.max(0, i * slot + Math.floor((slot - label.length) / 2)), HEADER_H + 1 + MH, label, dim(THEME[role], 0.8))
     }
     const msg = 'no workers · /orchestrate wakes them'
     g.text(Math.max(0, Math.floor((cols - [...msg].length) / 2)), HEADER_H + MH + 2, msg, FAINT)

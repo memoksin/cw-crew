@@ -1,4 +1,5 @@
-// The crew's creatures: a round owl per scout, a baby dragon per coder (purple and crowned on Opus).
+// The crew's creatures: a round owl per scout, a plum owl in glasses per reviewer, a baby dragon per coder
+// (purple and crowned on Opus).
 // Drawn in code at 60x32 pixels, 4x the old 15x8 half-block sprites each way, for terminals that
 // show images; the same frame downsampled to 15x8 half-blocks for the ones that draw cells only.
 // Frames step every FRAME_MS; motion is eased over long loops so nothing jumps more than a pixel or two.
@@ -126,6 +127,10 @@ const OWL: Pal = {
   body: 0x63c9cf, shade: 0x3d9cad, light: 0xb4f0ea, belly: 0xfff3da, mark: 0xe8cf9f,
   wing: 0x4aa3bd, face: 0xeafaf6, beak: 0xffa938, horn: 0x3d9cad,
 }
+const REVIEW_OWL: Pal = {
+  body: 0xe58fb4, shade: 0xb9628f, light: 0xffd1e3, belly: 0xfff3da, mark: 0xe8b8c8,
+  wing: 0xc66f9c, face: 0xfff0f5, beak: 0xffa938, horn: 0xb9628f,
+}
 const DRAGON: Pal = {
   body: 0xffab52, shade: 0xe27c2f, light: 0xffd79c, belly: 0xfff0c8, mark: 0xf0c084,
   wing: 0xff6f5e, face: 0xffab52, beak: 0, horn: 0xfff4dc,
@@ -144,6 +149,9 @@ type Body = {
   hat?: 'crown' | 'nightcap' | 'shell'; glasses?: boolean; flap: number
 }
 type Frame = { cx: number; cy: number; top: number; bottom: number; rx: number; ry: number; eyY: number }
+
+const owl = (role: Role) => role !== 'coder'
+const palOf = (role: Role, opus: boolean) => role === 'scout' ? OWL : role === 'reviewer' ? REVIEW_OWL : opus ? DRAGON_OPUS : DRAGON
 
 function frameOf(b: Body): Frame {
   const top = 8 + b.y + b.squash, bottom = 30.5 + b.y
@@ -217,7 +225,7 @@ function body(c: Canvas, role: Role, pal: Pal, b: Body) {
   c.oval(cx - 0.6, cy - 0.9, rx - 1.1, ry - 0.9, pal.body)
   c.oval(cx - 6, top + 3.6, 3.6, 1.7, pal.light)
   c.oval(cx, bottom - 5.8, 7.6, 5.4, pal.belly)
-  if (role === 'scout') {
+  if (owl(role)) {
     for (const [mx, my] of [[-4, -5], [1, -5], [-2, -2.5], [3, -2.5]] as const) {
       const x = Math.floor(cx + mx), y = Math.floor(bottom + my)
       c.put(x, y, pal.mark); c.put(x + 1, y + 1, pal.mark); c.put(x + 2, y, pal.mark)
@@ -233,7 +241,7 @@ function body(c: Canvas, role: Role, pal: Pal, b: Body) {
 
   // feet
   for (const s of [-1, 1]) {
-    if (role === 'scout') c.oval(cx + s * 5, bottom, 2.6, 1.3, pal.beak)
+    if (owl(role)) c.oval(cx + s * 5, bottom, 2.6, 1.3, pal.beak)
     else c.oval(cx + s * 6, bottom - 0.3, 3, 1.6, pal.shade)
   }
 
@@ -252,7 +260,7 @@ function body(c: Canvas, role: Role, pal: Pal, b: Body) {
 
   const my = Math.floor(eyY + 3)
   const mx = Math.floor(cx)
-  if (role === 'scout') {
+  if (owl(role)) {
     if (b.mouth === 'open' || b.mouth === 'o') {
       c.rect(mx - 2, my, 4, 1, pal.beak); c.rect(mx - 2, my + 1, 4, 2, EYE)
       c.put(mx - 2, my + 1, pal.beak); c.put(mx + 1, my + 1, pal.beak); c.rect(mx - 1, my + 3, 2, 1, pal.beak)
@@ -303,12 +311,12 @@ function body(c: Canvas, role: Role, pal: Pal, b: Body) {
 function arm(c: Canvas, role: Role, pal: Pal, b: Body, side: number, kind: Arm) {
   const { cx, cy, eyY } = frameOf(b)
   // owls have wings, dragons stubby paws: smaller, in the body's shade
-  const col = role === 'scout' ? pal.wing : pal.shade
-  const k = role === 'scout' ? 1 : 0.75
+  const col = owl(role) ? pal.wing : pal.shade
+  const k = owl(role) ? 1 : 0.75
   const s = side
   const limb = (x: number, y: number, rx: number, ry: number) => c.rim(x, y, rx * k, ry * k, col)
   switch (kind) {
-    case 'down': limb(cx + s * (role === 'scout' ? 11.2 : 10), cy + 3, 2.5, 4.8); break
+    case 'down': limb(cx + s * (owl(role) ? 11.2 : 10), cy + 3, 2.5, 4.8); break
     case 'up': limb(cx + s * 12.4, cy - 8.5, 2.3, 4.5); break
     case 'wave':
       if (b.phase % 8 < 4) limb(cx + s * 12.4, cy - 8.5, 2.3, 4.5)
@@ -356,7 +364,8 @@ const BREATHE: Pose[] = ['think', 'read', 'write', 'bash', 'web', 'test', 'ask',
 export type Look = { role: Role; opus: boolean; state: Pose; frame: number; blink: boolean }
 
 export function lookAt(role: Role, model: string, state: Pose, now: number, stateAt: number, seed: number): Look {
-  const opus = /opus/i.test(model)
+  // Only coders wear the Opus crown: frames/ holds no crowned owls.
+  const opus = role === 'coder' && /opus/i.test(model)
   const tick = Math.floor(now / FRAME_MS) + seed
   const intro = INTRO[state] ?? 0, loop = LOOP[state]
   const step = Math.floor(Math.max(0, now - stateAt) / FRAME_MS)
@@ -368,7 +377,7 @@ export const lookKey = (l: Look) => `${l.role}${l.opus ? '+' : ''}:${l.state}:${
 export const frameCount = (state: Pose) => (INTRO[state] ?? 0) + LOOP[state]
 
 export function drawLook({ role, opus, state, frame: f, blink }: Look): Canvas {
-  const pal = role === 'scout' ? OWL : opus ? DRAGON_OPUS : DRAGON
+  const pal = palOf(role, opus)
   const c = new Canvas(BIG_W, BIG_H, BIG_S)
   const fx = new Canvas(BIG_W, BIG_H, BIG_S)
   const b: Body = {
@@ -717,6 +726,7 @@ export function drawLook({ role, opus, state, frame: f, blink }: Look): Canvas {
 
   if (BREATHE.includes(state)) b.squash += 0.7 * cyc(f, 16)
   if (blink && (b.eyes === 'open' || b.eyes === 'wide')) b.eyes = 'closed'
+  if (role === 'reviewer') b.glasses = true
   if (creature) {
     body(c, role, pal, b)
     mid()
@@ -742,6 +752,16 @@ const SMALL_BODY: Record<Role, string[]> = {
     '.hBBBBh.',
     'BFFBBFFB',
     'BFFBBFFB',
+    'BBByyBBB',
+    'WBccccBW',
+    'WBccccBW',
+    '..o..o..',
+  ],
+  reviewer: [
+    '.h....h.',
+    '.hBBBBh.',
+    'BggBBggB',
+    'BFFggFFB',
     'BBByyBBB',
     'WBccccBW',
     'WBccccBW',
@@ -779,11 +799,11 @@ export function drawSmall({ role, opus, state, frame: big, blink }: Look): Canva
     : state === 'done' ? (big < 16 ? big >> 1 : 8)
     : big >> 1
   const p = new Canvas(SMALL_W, SMALL_H)
-  const pal = role === 'scout' ? OWL : opus ? DRAGON_OPUS : DRAGON
-  const theme = role === 'scout' ? 0x4fd1c5 : opus ? 0xb59cff : 0xffb347
+  const pal = palOf(role, opus)
+  const theme = role === 'scout' ? 0x4fd1c5 : role === 'reviewer' ? 0xff8fb8 : opus ? 0xb59cff : 0xffb347
   const colors: Record<string, number> = {
     h: pal.horn, H: pal.horn, B: pal.body, F: pal.face, y: pal.beak, c: pal.belly, o: pal.beak,
-    w: pal.wing, t: pal.body, d: pal.shade,
+    w: pal.wing, t: pal.body, d: pal.shade, g: OUT,
   }
   const celebrating = state === 'done' && f < 8
   const ox = state === 'blocked' && f < 2 ? f : 0
@@ -817,7 +837,7 @@ export function drawSmall({ role, opus, state, frame: big, blink }: Look): Canva
   if (state !== 'failed' && role === 'coder') { p.put(ox + 1, oy + 4, BLUSH); p.put(ox + 6, oy + 4, BLUSH) }
   if (role === 'coder' && (state === 'done' || state === 'ask' || state === 'resumed')) { p.put(ox + 3, oy + 4, EYE); p.put(ox + 4, oy + 4, EYE) }
 
-  const limb = role === 'scout' ? pal.wing : pal.shade
+  const limb = owl(role) ? pal.wing : pal.shade
   const armUp = (x: number) => { p.put(ox + x, oy + 2, limb); p.put(ox + x, oy + 3, limb) }
   const armDown = (x: number) => { p.put(ox + x, oy + 5, limb); p.put(ox + x, oy + 6, limb) }
   armDown(0)
