@@ -22,6 +22,7 @@ Claude Code plugin: `orchestrate` skill + `cw` worker CLI + crew pane (hooks mod
 - No user-specific paths or names. Personal setup goes through env (`CW_*`), documented in README's table.
 - Nothing leaves the machine by default. Jev (OpenRouter) stays opt-in via `CW_JEV=1`.
 - `cw` and `cwwait` bodies stay inside one `{ }` block: editing them must not break running workers.
+- Roles: scout, coder, reviewer. A new role touches `bin/cw`, the `[cw (scout|coder|reviewer) ` regexes in cwls/cwopen/cwkill, `Role` in `scene.ts`, `creatures.ts` + `tools/dump.ts` (then `tools/gen_frames.sh`).
 - Worker safety tiers live in `bin/cw` (deny / ask / allow). Never widen deny; `cwkill` only stops the worker's own tree or `CW_KILL_ALLOW` prefixes.
 - UI text in English.
 - Bump `version` in `.claude-plugin/plugin.json` on each release.
@@ -32,5 +33,6 @@ Claude Code plugin: `orchestrate` skill + `cw` worker CLI + crew pane (hooks mod
 - `claude plugin test .`
 - `tsc -p .` (types appear in `.claude-plugin/types/` after the engine loads the plugin)
 - `for f in bin/*; do bash -n "$f"; done`
+- `tests/cw.sh` (bin/cw with a fake claude; `claude plugin test` cannot start processes)
 - Smoke: `bin/cw scout <<< "Reply ok. No tools."` → meta line `rc=0`.
 - Local run: `claude --plugin-dir .`, or `/reload-plugins` when installed from this folder.

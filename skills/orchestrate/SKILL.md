@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Opus orchestrates lean headless Claude workers to save usage limits. Haiku scout reads, gathers context, researches the web and reports; Sonnet coder writes code. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
+description: Opus orchestrates lean headless Claude workers to save usage limits. Haiku scout reads, gathers context, researches the web and reports; Sonnet coder writes code; a fresh Sonnet reviewer checks risky diffs. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
 ---
 
 # Orchestrate headless workers
@@ -13,8 +13,9 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 |---|---|---|---|
 | `scout` | Haiku | Read, read-only Bash (rg, fd, git log…); `-w` adds WebFetch/WebSearch | find files and call sites, summarize code/docs, web research, logs, reports |
 | `coder` | Sonnet | Read, Edit, Write, Bash (auto mode; commit/push/reset/clean blocked) | implement a spec, run its tests |
+| `reviewer` | Sonnet | Read, read-only Bash; no web, no edits. cw inlines the diff | second pair of eyes on a finished diff, fresh context |
 
-Override model: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`).
+Override model: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`).
 
 ### Opus coder (rare, expensive)
 
@@ -30,15 +31,16 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 1. Scout (Haiku) investigates **before** the work: finds files and call sites, reads code and docs, researches, reports facts.
 2. Lead writes the spec from that report.
 3. Coder (Sonnet) does the work.
-4. Lead verifies the result **itself**: diff, reruns tests, looks at screenshots. Never hand verification or screenshot review to a scout.
-5. Issues with this task → resume the coder with the exact fixes, back to 4. A new task → a fresh worker, back to 1 (never resume for new work, see "Resume cost").
+4. Reviewer (Sonnet, read-only) reads the diff with a clean context, only when "Reviewer" below says so.
+5. Lead verifies the result **itself**: diff, reruns tests, looks at screenshots. Never hand verification or screenshot review to a scout; a review is input to it, not a substitute.
+6. Issues with this task → resume the coder with the exact fixes, back to 5. A new task → a fresh worker, back to 1 (never resume for new work, see "Resume cost").
 
 ## Run
 
 The plugin puts `cw`, `cwgo`, `cwwait`, `cwls`, `cwopen`, `cwwt` and `cwkill` on the Bash PATH. If `command -v cw` finds nothing, call them as `${CLAUDE_SKILL_DIR}/../../bin/<name>`. Needs `claude`, `jq`, `perl`, `git` (install notes: README).
 
 ```sh
-cw scout|coder [-C dir] [-W name] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
+cw scout|coder|reviewer [-C dir] [-W name] [-B ref] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
 ```
 
 - Report → stdout. Meta → stderr: `[cw role model rc subtype sid turns new_in cache_r out denied secs accept=… log=…]`.
@@ -71,6 +73,31 @@ cwopen -x NAME  # close a request you settled without a resume (did it yourself,
 - The fleet dir is `$CW_FLEET`, default `~/.claude/cw-runs/fleet/<repo>`. It holds NAME.task/.out/.err/.pid/.seen.
 - Shared spec parts (project facts, phase brief) live in reusable files. Pass them before the task file.
 
+## Reviewer
+
+A writer's own context is the worst place to review its diff. The reviewer starts fresh, sees only the diff, the specs and your focus note, and reports:
+
+```
+DONE review: 1 blocker, 2 suggest
+BLOCKER src/auth.ts:42 - token compared with ==; use timingSafeEqual
+SUGGEST src/auth.test.ts:10 - no test for an expired token
+```
+
+```sh
+cwgo api.rv reviewer -W api -- specs/common.md specs/api.md   # (run_in_background) a worktree's changes
+cw reviewer -B main -f specs/api.md <<< "Focus: error paths."   # a branch since its merge base
+cw reviewer <<< "Focus: the migration."                         # uncommitted changes in this tree
+```
+
+- cw puts the diff in the prompt (cut at `CW_REVIEW_MAX`, 60k chars). An empty diff exits 2 before any model call. `-W` never creates a worktree.
+- Call it after a coder ends `DONE` with `accept=pass`, and only when the diff is risky: auth, permissions, secrets or input validation; money; deleting or migrating data; concurrency or caching; a public API or file format others parse; 3+ files or ~150+ changed lines; or a spec with a rules file (security list, project standards).
+- Skip it: one-line fixes, docs, renames, tests-only changes, a diff you read fully in under a minute, and any run whose tests still fail (fix first; review last).
+- Pass the same spec files the coder got, and the rule lists that matter (`specs/security.md`). Expertise goes in spec files, not new roles.
+- `BLOCKER` → resume the coder with those lines (`-r <sid>`), then verify yourself. Do not re-review a small fix; a second review only when the fix rewrote the change.
+- `SUGGEST` → take what is cheap and right, drop the rest. `UNSURE` → check it yourself before acting.
+- Cost: one reviewer per diff, ~3k cold start plus the diff, usually under 5 turns (limit 20). Never resume a reviewer for a new diff: a fresh one is cheaper and keeps its context clean. Default effort `low`; `-e medium` for security or data-loss risk.
+- Haiku (`CW_REVIEWER_MODEL=claude-haiku-5-5`) only for mechanical checks against an explicit list.
+
 ## Cost model (measured)
 
 - Cold start: ~3k (scout) / ~3.4k (coder) tokens. A plain `claude -p` costs ~75k; a subagent costs 25–42k.
@@ -98,12 +125,12 @@ cwopen -x NAME  # close a request you settled without a resume (did it yourself,
 
 - One ask per coder run. Specs that bundled 2-5 fixes or a whole level mostly ended in `error_max_turns` or a timeout with no report. Split them and run them in a fleet.
 - A look or feel goal ("too far", "should flinch", a camera angle) needs a measurable check (a number, a pixel or luminance test, a reference shot) or a QUESTION gate. Without one, workers loop to the turn limit or pick the wrong target.
-- Never ask a worker to commit, merge or write where its role cannot (scouts have no Write). Those calls are denied and the run ends blocked.
+- Never ask a worker to commit, merge or write where its role cannot (scouts and reviewers have no Write). Those calls are denied and the run ends blocked.
 - Reports start with `DONE`, `PARTIAL` or `BLOCKED`. Treat anything but `DONE` as not done, whatever rc says.
 
 ## Effort
 
-- Default `-e auto`: role default (scout `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README). A resume keeps the effort of the run it continues.
+- Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README). A resume keeps the effort of the run it continues.
 - Override with `-e low|medium|high` only for a known reason: a fix-up after a failed attempt → `-e high`.
 - Never xhigh/max for workers: work that needs it, Opus does itself.
 
@@ -137,7 +164,7 @@ Default for 2+ background workers. Never wait for the whole fleet.
 
 1. Start each worker with its own background Bash call: `cwgo NAME coder -W NAME -T '<acceptance>' -- <spec files>` (writers in their own worktrees).
 2. Each worker's notification carries its meta and report, or its question.
-3. When one fires: read the report, `cwwt diff NAME --stat`, risky hunks, screenshots if visual. `accept=pass` already ran its tests in its tree.
+3. When one fires: read the report, `cwwt diff NAME --stat`, risky hunks, screenshots if visual. `accept=pass` already ran its tests in its tree. Risky diff → `cwgo NAME.rv reviewer -W NAME -- <spec files>` (background) and review the rest while it runs.
 4. PERMISSION (rc=4) or QUESTION (rc=3) → answer it first (see above), resume with `cwgo NAME.fix coder -r <sid> <<< "..."` (background), back to 3.
 5. Not good enough → resume the same worker right away with the exact issues. Good → `cwwt apply NAME`, rerun the affected tests in the main tree, commit if the user allows, `cwwt rm NAME`.
 6. Lost track (context compacted, a notification missed)? `cwls` and `cwopen`, or one background `cwwait`, report whatever is still unreviewed.

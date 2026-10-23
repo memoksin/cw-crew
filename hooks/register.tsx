@@ -260,7 +260,7 @@ export const register: Register = on => {
     session = await $.session.id()
     const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
     dir = msysToWin((await $.env.get('CW_LOG_DIR')) || `${home}/.claude/cw-runs`).replace(/\\/g, '/')
-    await $.command.register({ name: 'crew', description: 'Open the cw worker pane (Haiku scouts / Sonnet coders)' })
+    await $.command.register({ name: 'crew', description: 'Open the cw worker pane (scouts, coders, reviewers)' })
     $.clock.every(400, () => void poll($).catch(err => $.ui.log(`cw-crew poll: ${String(err)}`)))
     $.clock.every(FRAME_MS, () => void paint($).catch(() => { mounted = undefined }))
     return next(e)

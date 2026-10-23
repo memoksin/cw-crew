@@ -2,9 +2,9 @@
 
 Claude Code plugin. The main session (Opus) leads; cheap headless workers do the reading and the coding.
 
-- **`orchestrate` skill** — the playbook: scout → spec → coder → verify, fleets, permissions, cost rules.
+- **`orchestrate` skill** — the playbook: scout → spec → coder → reviewer → verify, fleets, permissions, cost rules.
 - **`cw` CLI** (`bin/`, on the Bash PATH) — starts one `claude -p` worker with a ~3k-token cold start.
-  - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests).
+  - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests). `reviewer` = Sonnet, read-only, no web: a fresh context reads a diff that `cw` inlines and reports `BLOCKER` / `SUGGEST` lines with file:line.
   - Fleet tools: `cwgo` (run one worker, notify when it finishes or asks), `cwwait` (recovery waiter), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`.
 - **Crew pane** — pixel-art side pane: each worker as a creature on its own card, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts.
   - A card's bottom edge fills with the limit closest to running out (context, turns or time), coloured as [memobar](https://github.com/memoksin/memobar) colours usage: green under 50%, yellow to 80%, red from 80%. From 50% the card names it (`ctx 64%`).
@@ -60,15 +60,18 @@ cw scout -f src/app.ts <<< "List every caller of parseConfig with file:line."
 cwgo api coder -W api -T 'npm test' -- specs/common.md specs/api.md
 #   run cwgo in the background: it waits for its worker and prints the report or question
 cwwait   # recovery: fires when any unreported worker finishes (use with cwgo -d)
+cwgo api.rv reviewer -W api -- specs/api.md   # review worktree api's changes
+cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 ```
 
 ## Settings (env)
 
 | Var | Default | What |
 |---|---|---|
-| `CW_SCOUT_MODEL` / `CW_CODER_MODEL` | `claude-haiku-5-5` / `claude-sonnet-5-5` | worker models |
+| `CW_SCOUT_MODEL` / `CW_CODER_MODEL` / `CW_REVIEWER_MODEL` | `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5` | worker models |
 | `CW_MAX_TURNS` | 80 | coder turn limit |
-| `CW_TIMEOUT` | 3600 coder / 1200 scout | seconds |
+| `CW_TIMEOUT` | 3600 coder / 1200 scout, reviewer | seconds |
+| `CW_REVIEW_MAX` | 60000 | characters of diff a reviewer gets inline; the rest it reads itself |
 | `CW_LOG_DIR` | `~/.claude/cw-runs` | run logs (the pane reads them too) |
 | `CW_FLEET` | `$CW_LOG_DIR/fleet/<repo>` | fleet dir |
 | `CW_WT_ROOT` | `../<repo>-wt` | worktree root |
@@ -85,6 +88,7 @@ Set them in `~/.claude/settings.json` under `env`.
 claude --plugin-dir .          # run from this folder
 claude plugin validate .
 claude plugin test .
+tests/cw.sh                    # bin/cw against a fake claude (no model call)
 tools/gen_frames.sh            # rebuild frames/ after changing hooks/creatures.ts (needs bun + Pillow)
 ```
 

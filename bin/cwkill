@@ -21,7 +21,7 @@ fi
 # This worker's cw process: nearest ancestor running the cw script.
 root=""; p=$PPID
 while [ -n "$p" ] && [ "$p" -gt 1 ]; do
-  case $(cmd_of "$p") in */cw\ coder*|*/cw\ scout*) root=$p; break ;; esac
+  case $(cmd_of "$p") in */cw\ coder*|*/cw\ scout*|*/cw\ reviewer*) root=$p; break ;; esac
   p=$(ppid_of "$p")
 done
 [ -n "$root" ] || { echo "cwkill: not running under a cw worker; refused" >&2; exit 3; }

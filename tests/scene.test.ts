@@ -185,7 +185,7 @@ test('a turn-limited run that cw auto-continues is never shown as failed', async
 })
 
 test('every role, model and state has a drawn sprite at both sizes in every frame', async () => {
-  for (const [role, opus] of [['scout', false], ['coder', false], ['coder', true]] as const) {
+  for (const [role, opus] of [['scout', false], ['reviewer', false], ['coder', false], ['coder', true]] as const) {
     for (const state of ALL_POSES) {
       for (let frame = 0; frame < frameCount(state); frame++) {
         const look = { role, opus, state, frame, blink: false }
@@ -235,7 +235,8 @@ test('in image mode each card leaves its sprite cells blank and lists one Image 
       expect(pics.words[(y * 140 + x) * 3]).toBe(0x20)
     }
   }
-  expect(drawScene([], 60, now, undefined, true).spots.length).toBe(2)
+  expect(drawScene([], 40, now, undefined, true).spots.length).toBe(2)
+  expect(drawScene([], 60, now, undefined, true).spots.map(s => s.alt)).toEqual(['scout asleep', 'coder asleep', 'reviewer asleep'])
 })
 
 test('the acceptance run after the result shows as testing, then done or failed', async () => {
@@ -356,4 +357,20 @@ test('msysToWin maps /c/... to C:/... and leaves other paths alone', () => {
   expect(msysToWin('/c/Users/x/.claude/cw-runs')).toBe('C:/Users/x/.claude/cw-runs')
   expect(msysToWin('/d')).toBe('D:')
   for (const p of ['/Users/x', '/home/x', 'C:/Users/x', '/runs', '']) expect(msysToWin(p)).toBe(p)
+})
+
+test('a reviewer gets its own names, colour, owl in glasses and 20-turn budget', async () => {
+  const runs: Run[] = ['reviewer', 'scout', 'reviewer'].map((role, i) => ({
+    id: `v${i}`, meta: meta({ role: role as Meta['role'], model: role === 'reviewer' ? 'claude-sonnet-5-5' : 'haiku', start: T0 + i }),
+    events: [{ e: 'think', t: T0 * 1000 + 50 }],
+  }))
+  const ws = buildWorkers(runs, T0 * 1000 + 4000)
+  expect(ws.map(w => [w.role, w.name, w.maxTurns])).toEqual([['reviewer', 'LENS', 20], ['scout', 'KIRI', 40], ['reviewer', 'OPAL', 20]])
+  const look = lookAt('reviewer', 'claude-sonnet-5-5', 'think', T0 * 1000, T0 * 1000, 0)
+  expect(imageSource(look, '/mod').file.startsWith('/mod/frames/reviewer-think-')).toBe(true)
+  const scout = bigSprite({ ...look, role: 'scout' }).px, rev = bigSprite(look).px
+  expect(rev.some((c, i) => c !== scout[i])).toBe(true)
+  // An Opus reviewer keeps the uncrowned owl: frames/ has no reviewer_opus files.
+  expect(lookAt('reviewer', 'claude-opus-5-5', 'think', 0, 0, 0).opus).toBe(false)
+  expect(lookAt('coder', 'claude-opus-5-5', 'think', 0, 0, 0).opus).toBe(true)
 })
