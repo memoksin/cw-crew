@@ -31,6 +31,8 @@ Tiers 1-3 are opt-in: they need `CW_AGY=1` in the user's env. Check once per ses
 | 4 | `sonnet` (Sonnet 5.5) | Claude | `-w` web research uses `haiku` | hard: cross-file refactor, unknown-cause bug, retry after a tier 1-3 failure; tasks needing `-a` |
 | 5 | `opus` (Opus 5.5) | Claude | — | rare: see Opus coder below |
 
+- The agy Claude/GPT bucket is small: two Opus 4.6 coder runs (~2.4M tokens, mostly cache reads) used a whole 5-hour window and half the week on a Pro plan. Use `sonnet46`/`opus46` for short runs (scouts, a few-file fix); give long coder tasks to `sonnet`. Gemini quota is far larger.
+
 - Defaults: scout `flash` with `CW_AGY=1` (`haiku` with `-w` or when off), coder `sonnet`. Always pass `-M` for coders.
 - Do not hold back tiers 4-5 when the task needs them: a failed cheap run plus a retry costs more than one right run.
 - Failed or weak result on an agy tier: rerun one tier up with what went wrong. An agy session resumes (`-r`) only on agy.

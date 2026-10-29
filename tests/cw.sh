@@ -93,5 +93,18 @@ check "Jev unsure high (60%) runs at medium" 'arg medium && ! arg high'
 check "meta keeps Jev's own pick" 'jq -e ".effort_jev == \"high\" and .effort == \"medium\"" "$(command ls -t "$t"/logs/*.meta | head -1)" >/dev/null'
 rm -f "$t/bin/curl"
 
+# agy runs out of quota mid-run with no file changes: cw reruns the task on Claude, and agy's rc 3 is not a QUESTION.
+cat > "$t/bin/agy" <<'A'
+#!/usr/bin/env bash
+case "$*" in *"/usage"*) printf 'Claude and GPT models\tFive Hour Limit Remaining\t90%%\tx\nClaude and GPT models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
+echo '{"event":"init","conversation_id":"agy-1"}'
+echo '{"event":"result","result":{"conversation_id":"agy-1","status":"ERROR","response":"","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1,"cache_read_tokens":9}}}'
+echo 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}' >&2; exit 3
+A
+chmod +x "$t/bin/agy"; rm -f "$t/args"
+CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" coder -M opus46 <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "agy quota out mid-run: rerun on Claude Sonnet" 'arg claude-sonnet-5-5 && grep -q "rerunning on Claude" "$t/err" && [ $rc = 0 ]'
+rm -f "$t/bin/agy"
+
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

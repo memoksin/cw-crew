@@ -74,6 +74,8 @@ Spend a Google AI plan (Pro, Plus, Ultra) before Claude limits.
 3. Check: `cwagy` prints the quota of each home.
 4. More accounts: `cwagy login ~/.claude/cw-agy-2`, sign in with the other account, quit, then set
    `CW_AGY_HOME=~/.claude/cw-agy:~/.claude/cw-agy-2`. cw moves to the next home when one runs out.
+   **macOS: does not work yet.** agy reads its login from the macOS keychain in every home, so an extra home signs in as
+   the first account. Switch accounts by hand there (`agy`, then `/logout` and `/login`).
 
 agy coders run without permission prompts. cw guards them with deny rules (its ask and hard rules) and an env that
 makes git push and commit fail. A destructive command in another syntax can still run: give them small tasks.

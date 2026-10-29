@@ -28,6 +28,7 @@ tlimit() {
 }
 
 usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] < task" >&2; exit 2; }
+argv=("$@")   # for a rerun on Claude when agy runs out of quota mid-run
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
 base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""
@@ -312,7 +313,7 @@ if [ -n "$agy" ]; then
       else empty end
     elif .event=="result" then .result | {e:"result",ok:(.status=="SUCCESS" and (.response // "") != ""),sub:(.status|ascii_downcase),
       sid:.conversation_id,turns:.num_turns,denied:(.denied_actions // [] | length),out:.usage.output_tokens,
-      cin:.usage.cache_read_tokens,nin:((.usage.input_tokens // 0) - (.usage.cache_read_tokens // 0))}
+      cin:.usage.cache_read_tokens,nin:((.usage.input_tokens // 0))}
     else empty end | .t=(now*1000|floor)'
   where="Workspace: $dir"; [ ${#adddirs[@]} -gt 0 ] && where+=" (also readable: $(printf '%s ' "${adddirs[@]}" | sed 's/--add-dir //g'))"
   # Deny rules match the command text, so `git -C . commit` or `python -c "os.system('git push')"` slip past them.
@@ -324,11 +325,12 @@ if [ -n "$agy" ]; then
     --dangerously-skip-permissions --output-format stream-json "${adddirs[@]+"${adddirs[@]}"}" ${resume:+--conversation "$resume"}) 2> "$log.err" \
     | tee "$log.jsonl" | jq -Rc --unbuffered "$agyev" > "$log.events" 2>/dev/null
   rc=${PIPESTATUS[0]}
+  [ "$rc" = 3 ] && rc=1   # agy model error; in cw rc 3 means QUESTION
   jq -Rc --arg m "$model" 'fromjson? | select(.event=="result") | .result | ((.response // "") == "") as $empty
     | {type:"result", is_error:(.status != "SUCCESS" or $empty),
        subtype:(if .status != "SUCCESS" then (.status|ascii_downcase) elif $empty then "empty_response" else "success" end),
        result:(.response // ""), session_id:.conversation_id, num_turns:.num_turns,
-       usage:{input_tokens:((.usage.input_tokens // 0) - (.usage.cache_read_tokens // 0)), cache_creation_input_tokens:0,
+       usage:{input_tokens:((.usage.input_tokens // 0)), cache_creation_input_tokens:0,
          cache_read_input_tokens:(.usage.cache_read_tokens // 0), output_tokens:(.usage.output_tokens // 0)},
        modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
     "$log.jsonl" | tail -1 > "$log.json"
@@ -347,6 +349,12 @@ tree1=$(snap)
 if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
   git -C "$dir" diff --numstat "$tree0" "$tree1" 2>/dev/null | awk -v t="$(( $(date +%s) * 1000 ))" \
     '{a+=$1; d+=$2; n++} END {printf "{\"e\":\"diff\",\"add\":%d,\"del\":%d,\"files\":%d,\"t\":%s}\n", a, d, n, t}' >> "$log.events"
+fi
+# agy ran out of quota mid-run and changed nothing: run the same task again, agy tiers off (Claude fallback).
+if [ -n "$agy" ] && [ -n "$tree0" ] && [ "$tree1" = "$tree0" ] && grep -q RESOURCE_EXHAUSTED "$log.err" 2>/dev/null; then
+  echo "$rc" > "$log.done"
+  echo "cw: agy quota ran out mid-run (no file changes); rerunning on Claude" >&2
+  CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
 fi
 # Turn limit: resume the same session with a standard message instead of making the lead do it.
 # The note below is not a "[cw " line, so cwwait keeps waiting for the final one.

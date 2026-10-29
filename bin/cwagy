@@ -5,6 +5,8 @@
 #   cwagy prep DIR first|extra   (used by cw) link DIR to your HOME
 # The first home shares your own agy login: its ~/Library link reaches the keychain that holds the token. An extra
 # home links neither ~/Library nor ~/.gemini, so agy keeps that account's login and state apart.
+# macOS: agy still reads the keychain login in every home, so an extra home ends up as the first account (seen with
+# agy 2026-10); extra homes only work where agy keeps its token in the home.
 set -uo pipefail
 command -v agy >/dev/null || { echo "cwagy: needs agy (Antigravity CLI) on PATH" >&2; exit 2; }
 
