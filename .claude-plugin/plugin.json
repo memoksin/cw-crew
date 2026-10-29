@@ -1,7 +1,7 @@
 {
   "name": "cw-crew",
-  "version": "0.10.0",
-  "description": "Orchestrate lean headless Claude workers (Haiku scouts, Sonnet coders and reviewers) with the cw CLI, and watch them live in a pixel-art side pane",
+  "version": "0.11.0",
+  "description": "Orchestrate lean headless Claude workers (Haiku scouts, Sonnet coders and reviewers; opt-in Gemini / Antigravity CLI tiers) with the cw CLI, and watch them live in a pixel-art side pane",
   "author": {
     "name": "Mehmet Yiğit Keskin"
   },

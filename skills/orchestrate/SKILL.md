@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Opus orchestrates lean headless Claude workers to save usage limits. Haiku scout reads, gathers context, researches the web and reports; Sonnet coder writes code; a fresh Sonnet reviewer checks risky diffs. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
+description: Opus orchestrates lean headless workers to save Claude limits. Scouts read, gather context, research and report; coders write code; a fresh reviewer checks risky diffs. With CW_AGY=1, tiers spend Google AI quota first (Gemini Flash, Claude 4.6 on the Antigravity CLI) and Claude Sonnet/Opus 5.5 last. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
 ---
 
 # Orchestrate headless workers
@@ -9,17 +9,38 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 
 ## Roles
 
-| Role | Model | Tools | Use for |
-|---|---|---|---|
-| `scout` | Haiku | Read, read-only Bash (rg, fd, git log…); `-w` adds WebFetch/WebSearch | find files and call sites, summarize code/docs, web research, logs, reports |
-| `coder` | Sonnet | Read, Edit, Write, Bash (auto mode; commit/push/reset/clean blocked) | implement a spec, run its tests |
-| `reviewer` | Sonnet | Read, read-only Bash; no web, no edits. cw inlines the diff | second pair of eyes on a finished diff, fresh context |
+| Role | Tools | Use for |
+|---|---|---|
+| `scout` | read-only (Claude: Read + read-only Bash; agy: view_file, grep_search, find_by_name, list_dir); `-w` adds WebFetch/WebSearch (Claude only) | find files and call sites, summarize code/docs, web research, logs, reports |
+| `coder` | read, edit, write, shell; commit/push/reset/clean blocked | implement a spec, run its tests |
+| `reviewer` | Read, read-only Bash; no web, no edits. cw inlines the diff | second pair of eyes on a finished diff, fresh context |
 
-Override model: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`).
+Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on Claude (`-M haiku|sonnet|opus` only).
+
+## Tiers (`-M`): spend Google quota first, Claude last
+
+Pick the lowest tier likely to get it right on the first try. agy tiers run on the Antigravity CLI (Google AI plan); they do not touch Claude limits.
+
+Tiers 1-3 are opt-in: they need `CW_AGY=1` in the user's env. Check once per session: `echo ${CW_AGY:-0}`. Off: use only `haiku`, `sonnet`, `opus` and skip the agy rules below; scouts default to `haiku`.
+
+| Tier | `-M` | Quota | Scout | Coder |
+|---|---|---|---|---|
+| 1 | `flash` (Gemini 3.8 Flash) | agy Gemini | default: lookups, call sites, file:line answers | trivial: 1 file, a few lines, exact spec, a given check |
+| 2 | `sonnet46` (Claude Sonnet 4.6) | agy Claude/GPT | needs judgement: summarize a design, compare options | small: 1-3 files, clear approach |
+| 3 | `opus46` (Claude Opus 4.6) | agy Claude/GPT | hard reading: subtle flow across many files | normal feature with a clear spec, scoped bug |
+| 4 | `sonnet` (Sonnet 5.5) | Claude | `-w` web research uses `haiku` | hard: cross-file refactor, unknown-cause bug, retry after a tier 1-3 failure; tasks needing `-a` |
+| 5 | `opus` (Opus 5.5) | Claude | — | rare: see Opus coder below |
+
+- Defaults: scout `flash` with `CW_AGY=1` (`haiku` with `-w` or when off), coder `sonnet`. Always pass `-M` for coders.
+- Do not hold back tiers 4-5 when the task needs them: a failed cheap run plus a retry costs more than one right run.
+- Failed or weak result on an agy tier: rerun one tier up with what went wrong. An agy session resumes (`-r`) only on agy.
+- cw falls back to the role's Claude model (scout `haiku`, coder `sonnet`) on its own when agy is missing, the run uses `-w` or `-a`, or no agy home (one per Google account, `CW_AGY_HOME`) has quota at or above `CW_AGY_MIN` % (default 5). Homes are tried in order. The note `cw: ..., using <model>` goes to stderr. Quota of every home: `cwagy`.
+- agy coder safety is weaker than Claude's auto mode: deny rules match the command text (cw's ask rules are denied there too), and git push/commit are blocked by env. A `git reset --hard` or `rm` in another syntax can still run. Give agy coders small, git-free tasks; on an important repo use `-W`. They cannot get `-a` grants: a PERMISSION from an agy coder means rerun on `sonnet` with `-a`.
+- agy scouts can read files outside the repo (the prompt pins them to it). Tasks and the files they read go to Google.
 
 ### Opus coder (rare, expensive)
 
-Default coder is Sonnet. Use an Opus coder (`CW_CODER_MODEL=claude-opus-5-5`) only when the task is clearly beyond Sonnet:
+Default coder is Sonnet. Use an Opus coder (`-M opus`) only when the task is clearly beyond Sonnet:
 - 3D spatial reasoning that tests cannot fully check: camera, IK/rig poses, collision geometry, procedural 3D layout judged by screenshots.
 - Large cross-cutting rework (many files, subtle interacting state) where a wrong design is costly to redo.
 - A Sonnet coder already failed the same task twice with a good spec.
@@ -28,9 +49,9 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 
 ## The loop
 
-1. Scout (Haiku) investigates **before** the work: finds files and call sites, reads code and docs, researches, reports facts.
+1. Scout (default `flash`) investigates **before** the work: finds files and call sites, reads code and docs, researches, reports facts.
 2. Lead writes the spec from that report.
-3. Coder (Sonnet) does the work.
+3. Coder (tier by task size, see Tiers) does the work.
 4. Reviewer (Sonnet, read-only) reads the diff with a clean context, only when "Reviewer" below says so.
 5. Lead verifies the result **itself**: diff, reruns tests, looks at screenshots. Never hand verification or screenshot review to a scout; a review is input to it, not a substitute.
 6. Issues with this task → resume the coder with the exact fixes, back to 5. A new task → a fresh worker, back to 1 (never resume for new work, see "Resume cost").
@@ -40,7 +61,7 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 The plugin puts `cw`, `cwgo`, `cwwait`, `cwls`, `cwopen`, `cwwt` and `cwkill` on the Bash PATH. If `command -v cw` finds nothing, call them as `${CLAUDE_SKILL_DIR}/../../bin/<name>`. Needs `claude`, `jq`, `perl`, `git` (install notes: README).
 
 ```sh
-cw scout|coder|reviewer [-C dir] [-W name] [-B ref] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
+cw scout|coder|reviewer [-M tier] [-C dir] [-W name] [-B ref] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
 ```
 
 - Report → stdout. Meta → stderr: `[cw role model rc subtype sid turns new_in cache_r out denied secs accept=… log=…]`.

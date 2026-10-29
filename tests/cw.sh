@@ -12,7 +12,7 @@ echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"DONE review: clean","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
-export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0
+export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
 unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT
 fails=0
 ok() { echo "ok   $1"; }
@@ -71,6 +71,14 @@ check "cwls shows a finished reviewer as done" 'CW_FLEET=$t/fleet "$here/bin/cwl
 check "scout unchanged: Haiku, low, read-only, 40 turns" 'arg claude-haiku-5-5 && arg low && arg Read,Bash && arg 40 && ! grep -q "<diff" "$t/prompt"'
 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
 check "coder unchanged: Sonnet, medium, edits" 'arg claude-sonnet-5-5 && arg medium && arg Read,Edit,Write,Bash'
+
+# Tiers: agy tiers are off unless CW_AGY=1 and then fall back to Claude; Claude tiers pick the model.
+"$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"
+check "agy tier off: flash coder falls back to Sonnet" 'arg claude-sonnet-5-5 && grep -q "agy tiers are off" "$t/err"'
+"$here/bin/cw" scout -M opus <<< "x" >/dev/null 2>&1
+check "-M opus picks Opus 5.5" 'arg claude-opus-5-5'
+"$here/bin/cw" reviewer -M flash -W w1 </dev/null >/dev/null 2>"$t/err"
+check "reviewer refuses agy tiers" 'grep -q "reviewer stays on Claude" "$t/err"'
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

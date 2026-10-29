@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# cwagy — Antigravity CLI (agy) homes for cw's agy tiers (CW_AGY=1).
+#   cwagy                   quota of each home in CW_AGY_HOME (colon list, default ~/.claude/cw-agy)
+#   cwagy login DIR         make DIR an extra account home and open agy there to sign in; then add DIR to CW_AGY_HOME
+#   cwagy prep DIR first|extra   (used by cw) link DIR to your HOME
+# The first home shares your own agy login: its ~/Library link reaches the keychain that holds the token. An extra
+# home links neither ~/Library nor ~/.gemini, so agy keeps that account's login and state apart.
+set -uo pipefail
+command -v agy >/dev/null || { echo "cwagy: needs agy (Antigravity CLI) on PATH" >&2; exit 2; }
+
+linkdir() { local src=$1 dst=$2 e b; shift 2; mkdir -p "$dst"
+  for e in "$src"/.[!.]* "$src"/*; do [ -e "$e" ] || continue; b=${e##*/}
+    case " $* " in *" $b "*) continue ;; esac
+    [ -e "$dst/$b" ] || [ -L "$dst/$b" ] || ln -s "$e" "$dst/$b"
+  done; }
+prep() {
+  if [ "$2" = first ]; then
+    linkdir "$HOME" "$1" .gemini; linkdir "$HOME/.gemini" "$1/.gemini" antigravity-cli
+    linkdir "$HOME/.gemini/antigravity-cli" "$1/.gemini/antigravity-cli" settings.json agents
+  else
+    linkdir "$HOME" "$1" .gemini Library; mkdir -p "$1/.gemini/antigravity-cli"
+  fi; }
+
+case ${1:-} in
+  prep) [ $# -eq 3 ] || exit 2; prep "$2" "$3" ;;
+  login)
+    [ -n "${2:-}" ] || { echo "usage: cwagy login DIR" >&2; exit 2; }
+    d=$(mkdir -p "$2" && cd "$2" && pwd)
+    case $d in "$HOME") echo "cwagy: DIR must not be your HOME" >&2; exit 2 ;; esac
+    prep "$d" extra
+    echo "Sign in with the other Google account (/login if agy does not ask), then quit agy."
+    echo "Then add it: CW_AGY_HOME=\"${CW_AGY_HOME:-$HOME/.claude/cw-agy}:$d\""
+    cd "$d" && HOME=$d exec agy ;;
+  "")
+    IFS=: read -ra homes <<< "${CW_AGY_HOME:-$HOME/.claude/cw-agy}"; kind=first
+    for h in "${homes[@]}"; do
+      prep "$h" "$kind"; kind=extra
+      echo "== $h"; (cd "$h" && HOME=$h perl -e 'alarm shift; exec @ARGV' 15 agy -p /usage < /dev/null 2>/dev/null) || echo "(no quota: not signed in? run: cwagy login $h)"
+    done ;;
+  *) echo "usage: cwagy [login DIR]" >&2; exit 2 ;;
+esac

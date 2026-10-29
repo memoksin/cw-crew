@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # cw — run one headless Claude worker. Task on stdin, report on stdout, one meta line on stderr.
-#   cw scout|coder|reviewer [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task.md
+#   cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task.md
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
 #   -W name: run in a git worktree outside the repo (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
+#   -M tier: flash|sonnet46|opus46 (Antigravity CLI, Google AI quota) or haiku|sonnet|opus (Claude). See the tier block.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
@@ -26,12 +27,12 @@ tlimit() {
   perl -e 'alarm shift; exec @ARGV' "$t" "$@"
 }
 
-usage() { echo "usage: cw scout|coder|reviewer [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] < task" >&2; exit 2; }
+usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] < task" >&2; exit 2; }
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
-base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=()
-while getopts "C:r:t:wf:e:a:W:K:T:D:B:" o; do
-  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; *) usage ;; esac
+base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""
+while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:" o; do
+  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; *) usage ;; esac
 done
 [ "$role" = reviewer ] && [ -n "$web" ] && { echo "cw: reviewer has no web" >&2; exit 2; }
 [ -t 0 ] && [ "$role" != reviewer ] && { echo "cw: task must come on stdin" >&2; exit 2; }
@@ -80,6 +81,22 @@ report="Final message is your report: English, terse, max 15 lines. No code dump
 # Scouts and reviewers: read-only Bash.
 ro_allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
           "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
+
+# Coder rules, also turned into agy deny rules below. Risky but sometimes needed: in -p mode an "ask" rule is a denial,
+# which the worker turns into a PERMISSION request for the lead (see SKILL.md). Hard-never actions stay in --disallowedTools.
+coder_ask='["Bash(sudo *)","Bash(rm -r *)","Bash(rm -fr *)","Bash(rm -R *)","Bash(chmod *)","Bash(chown *)","Bash(kill *)",
+  "Bash(git checkout *)","Bash(git restore *)","Bash(git stash *)","Bash(git rebase *)","Bash(git branch -D *)","Bash(git worktree *)",
+  "Bash(brew *)","Bash(npm install -g *)","Bash(pip install *)","Bash(pip3 install *)","Bash(uv tool *)","Bash(sh)","Bash(bash)","Bash(zsh)",
+  "Bash(launchctl *)","Bash(osascript *)","Bash(defaults write *)","Bash(open *)","Bash(crontab *)",
+  "Bash(taskkill *)","Bash(powershell*)","Bash(pwsh*)","Bash(cmd *)","Bash(cmd.exe*)","Bash(reg add *)","Bash(reg delete *)","Bash(reg import *)","Bash(reg.exe *)",
+  "Bash(*Remove-Item*)","Bash(rd *)","Bash(del *)","Bash(rmdir /s*)","Bash(rmdir /S*)","Bash(rmdir //s*)","Bash(rmdir //S*)",
+  "Bash(schtasks*)","Bash(sc *)","Bash(sc.exe *)","Bash(setx *)","Bash(wsl*)","Bash(winget *)","Bash(choco *)","Bash(scoop *)",
+  "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)","Edit(~/AppData/**)","Write(~/AppData/**)"]'
+hard=("Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(git merge*)" "Bash(git cherry-pick*)" "Bash(git revert*)" "Bash(git am*)" "Bash(git pull*)" "Bash(rm -rf*)"
+  "Bash(pkill*)" "Bash(killall*)" "Bash(kill -1*)" "Bash(kill -9 -1*)" "Bash(kill -15 -1*)" "Bash(kill 0*)" "Bash(kill -- -*)" "Bash(kill -9 0*)" "Bash(kill -15 0*)" "Bash(kill -KILL *)" "Bash(kill -TERM -*)" "Bash(kill -s *)"
+  "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)"
+  "Bash(taskkill*/im *)" "Bash(taskkill*/IM *)" "Bash(taskkill*/fi *)" "Bash(taskkill*/FI *)" "Bash(diskpart*)" "Bash(format *:*)" "Bash(format.com *)" "Bash(bcdedit*)"
+  "Bash(vssadmin *delete*)" "Bash(vssadmin *Delete*)" "Bash(vssadmin *DELETE*)" "Bash(cipher*/w*)" "Bash(cipher*/W*)")
 if [ "$role" = scout ]; then
   model=${CW_SCOUT_MODEL:-claude-haiku-5-5}
   sp="You are a read-only research worker for an orchestrator. Do only the task. Bash allows only read-only commands (rg, grep, fd, eza, ls, wc, head, tail, sed -n, git log/show/diff/status/blame); others are denied. Search with rg (or grep) and read only the lines you need. Files given inline are already read. Cite facts as file:line or URL, only lines you read in this run; mark anything unverified. A 'none found' or 'complete' claim names the search command and its hit count. $report"
@@ -97,23 +114,9 @@ else
   model=${CW_CODER_MODEL:-claude-sonnet-5-5}
   sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never make a test pass by weakening it (raising a timeout, cap or threshold, dropping or rewriting an assertion): if a test looks wrong, keep it and say why, or ask. Never git commit, push, reset, clean, merge, cherry-pick, revert, am or pull, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed (also files outside the scope that a tool or import rewrote), commands run with results, test changes with before/after values, open issues."
   tools=Read,Edit,Write,Bash
-  # Risky but sometimes needed: in -p mode an "ask" rule is a denial, which the worker turns into a
-  # PERMISSION request for the lead (see SKILL.md). Hard-never actions stay in --disallowedTools.
-  ask='["Bash(sudo *)","Bash(rm -r *)","Bash(rm -fr *)","Bash(rm -R *)","Bash(chmod *)","Bash(chown *)","Bash(kill *)",
-    "Bash(git checkout *)","Bash(git restore *)","Bash(git stash *)","Bash(git rebase *)","Bash(git branch -D *)","Bash(git worktree *)",
-    "Bash(brew *)","Bash(npm install -g *)","Bash(pip install *)","Bash(pip3 install *)","Bash(uv tool *)","Bash(sh)","Bash(bash)","Bash(zsh)",
-    "Bash(launchctl *)","Bash(osascript *)","Bash(defaults write *)","Bash(open *)","Bash(crontab *)",
-    "Bash(taskkill *)","Bash(powershell*)","Bash(pwsh*)","Bash(cmd *)","Bash(cmd.exe*)","Bash(reg add *)","Bash(reg delete *)","Bash(reg import *)","Bash(reg.exe *)",
-    "Bash(*Remove-Item*)","Bash(rd *)","Bash(del *)","Bash(rmdir /s*)","Bash(rmdir /S*)","Bash(rmdir //s*)","Bash(rmdir //S*)",
-    "Bash(schtasks*)","Bash(sc *)","Bash(sc.exe *)","Bash(setx *)","Bash(wsl*)","Bash(winget *)","Bash(choco *)","Bash(scoop *)",
-    "Edit(~/.*)","Write(~/.*)","Edit(~/.claude/**)","Write(~/.claude/**)","Edit(~/Library/**)","Write(~/Library/**)","Edit(~/AppData/**)","Write(~/AppData/**)"]'
+  ask=$coder_ask
   maxt=${CW_MAX_TURNS:-80}
-  args=(--permission-mode auto --max-turns "$maxt" --allowedTools "Bash($here/cwkill *)"
-        --disallowedTools "Bash(git commit*)" "Bash(git push*)" "Bash(git reset*)" "Bash(git clean*)" "Bash(git merge*)" "Bash(git cherry-pick*)" "Bash(git revert*)" "Bash(git am*)" "Bash(git pull*)" "Bash(rm -rf*)"
-        "Bash(pkill*)" "Bash(killall*)" "Bash(kill -1*)" "Bash(kill -9 -1*)" "Bash(kill -15 -1*)" "Bash(kill 0*)" "Bash(kill -- -*)" "Bash(kill -9 0*)" "Bash(kill -15 0*)" "Bash(kill -KILL *)" "Bash(kill -TERM -*)" "Bash(kill -s *)"
-        "Bash(shutdown*)" "Bash(reboot*)" "Bash(halt*)" "Bash(diskutil *)" "Bash(dd *)" "Bash(mkfs*)"
-        "Bash(taskkill*/im *)" "Bash(taskkill*/IM *)" "Bash(taskkill*/fi *)" "Bash(taskkill*/FI *)" "Bash(diskpart*)" "Bash(format *:*)" "Bash(format.com *)" "Bash(bcdedit*)"
-        "Bash(vssadmin *delete*)" "Bash(vssadmin *Delete*)" "Bash(vssadmin *DELETE*)" "Bash(cipher*/w*)" "Bash(cipher*/W*)")
+  args=(--permission-mode auto --max-turns "$maxt" --allowedTools "Bash($here/cwkill *)" --disallowedTools "${hard[@]}")
 fi
 [ -n "$resume" ] && args+=(--resume "$resume")
 if [ ${#granted[@]} -gt 0 ]; then
@@ -124,6 +127,77 @@ if [ ${#granted[@]} -gt 0 ]; then
       | ($g | capture("^(?<t>[A-Za-z]+)\\((?<c>.*)\\)$")) as $n
       | ($m.t != $n.t) or (($m.p | rtrimstr("*") | rtrimstr(" ")) as $pre | ($n.c | startswith($pre)) | not)))
       | $r]' "${granted[@]}" <<< "${ask:-[]}")
+fi
+
+# Tier (-M): flash, sonnet46, opus46 run on the Antigravity CLI (agy; Google AI plan quota) and need CW_AGY=1;
+# haiku, sonnet, opus run on Claude. Default: coder sonnet; scout flash with CW_AGY=1, else (and with -w) haiku;
+# reviewer keeps CW_REVIEWER_MODEL unless -M names a Claude tier.
+# An agy tier falls back to the role's Claude model when agy tiers are off, the run needs -w or -a, agy is missing,
+# or no home in CW_AGY_HOME has quota (5h and weekly) at or above CW_AGY_MIN percent.
+[ -n "$tier" ] || [ "$role" = reviewer ] || { if [ "$role" = coder ]; then tier=sonnet; elif [ -n "$web" ] || [ "${CW_AGY:-0}" != 1 ]; then tier=haiku; else tier=flash; fi; }
+agy=""
+[ "$role" = reviewer ] && case $tier in flash|sonnet46|opus46) echo "cw: agy tiers are for scouts and coders; reviewer stays on Claude" >&2; tier="" ;; esac
+case $tier in
+  "") ;;
+  flash) agy=gemini-3.8-flash-high ;; sonnet46) agy=claude-sonnet-4-6 ;; opus46) agy=claude-opus-4-6-thinking ;;
+  haiku) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; sonnet) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; opus) model=claude-opus-5-5 ;;
+  *) usage ;;
+esac
+if [ -n "$agy" ]; then
+  # agy keeps settings and login under $HOME: each home in CW_AGY_HOME is a HOME of symlinks to the real one (see
+  # cwagy) with cw's own settings.json (deny rules) and agents/. Tool commands see this HOME too.
+  # Homes are tried in order: the first with quota left runs the task; a resume goes back to its session's home.
+  why=""; ah=""
+  if [ "${CW_AGY:-0}" != 1 ]; then why="agy tiers are off (CW_AGY=1 turns them on)"
+  elif [ -n "$web" ]; then why="agy tiers have no web tools"
+  elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
+  elif ! command -v agy >/dev/null; then why="agy not on PATH"
+  elif [ -n "$resume" ] && [ -f "$logdir/dirs/$resume.agy" ]; then ah=$(cat "$logdir/dirs/$resume.agy")
+  else
+    case $agy in gemini*) bucket="Gemini Models" ;; *) bucket="Claude and GPT models" ;; esac
+    IFS=: read -ra homes <<< "${CW_AGY_HOME:-$HOME/.claude/cw-agy}"; kind=first; notes=""
+    for h in "${homes[@]}"; do
+      "$here/cwagy" prep "$h" "$kind"; kind=extra
+      quota=$(cd "$h" && HOME=$h tlimit 15 agy -p /usage < /dev/null 2>/dev/null | awk -F'\t' -v b="$bucket" '$1 == b { v = $3 + 0; if (m == "" || v < m) m = v } END { print m }')
+      if [ -z "$quota" ]; then notes+=" ${h##*/}: no quota (signed in? cwagy login $h)"
+      elif [ "$quota" -lt "${CW_AGY_MIN:-5}" ]; then notes+=" ${h##*/}: $quota%"
+      else ah=$h; break; fi
+    done
+    [ -n "$ah" ] || why="no agy home has '$bucket' quota left:$notes"
+  fi
+  if [ -n "$why" ]; then
+    [ -n "$resume" ] && { echo "cw: $why; an agy session cannot resume on Claude: rerun it fresh" >&2; exit 2; }
+    [ "$role" = scout ] && model=${CW_SCOUT_MODEL:-claude-haiku-5-5} || model=${CW_CODER_MODEL:-claude-sonnet-5-5}   # reviewer never gets here
+    echo "cw: $why, using $model" >&2; agy=""
+  fi
+fi
+if [ -n "$agy" ]; then
+  model=agy/$agy
+  # agy has no read-scope rule that works for custom agents in headless mode, so runs skip permission prompts: the
+  # agent's tool list and the deny rules (cw's ask and hard rules, prefix-matched, so never wider) are the guard.
+  deny=()
+  while IFS= read -r r; do
+    case $r in
+      Bash\(*\*\)) p=${r#Bash(}; p=${p%)}; p=${p#\*}; p=${p%%\**}; p=${p%% }; [ -n "$p" ] && deny+=("command($p)") ;;
+      Edit\(~/*|Write\(~/*) p=${r#*(~/}; p=${p%%\**}; p=${p%)}; p=${p%/}
+        if [ "$p" = . ]; then for e in "$HOME"/.[!.]*; do deny+=("write_file($e)" "write_file($ah/${e##*/})"); done
+        else deny+=("write_file($HOME/$p)" "write_file($ah/$p)"); fi ;;
+    esac
+  done < <(printf '%s\n' "${hard[@]}"; jq -r '.[]' <<< "$coder_ask")
+  deny+=("command(bash -c)" "command(sh -c)" "command(zsh -c)" "command(eval)")   # bare bash/sh/zsh rules: their -c bypass
+  put() { [ "$(cat "$1" 2>/dev/null)" = "$2" ] || { printf '%s\n' "$2" > "$1.$$" && mv "$1.$$" "$1"; }; }   # atomic: runs share it
+  put "$ah/.gemini/antigravity-cli/settings.json" "$(jq -n --args '{permissions: {deny: ($ARGS.positional | unique)}}' "${deny[@]}")"
+  # Gemini and the 4.6 models follow short prompts loosely: name the method, the stop point and the citation rule.
+  pin="Open and edit files only inside the workspace the task names; never touch the home directory, dotfiles or other projects. Cite path:line as plain text, no markdown links. No preamble, no restating the task."
+  if [ "$role" = scout ]; then
+    aname=cw-scout; atools="view_file, grep_search, find_by_name, list_dir"
+    sp="You are a read-only research worker for an orchestrator. Do only the task. $pin Method: locate with grep_search or find_by_name, then view_file a line range around each hit; do not read whole large files. Files given inline in the task are already read: do not open them again. Stop as soon as every question in the task is answered; no extra exploration. Every fact cites path:line from a file you opened in this run; mark anything else NOT CHECKED. Never guess a name, path or number. A 'none found' claim names the search and its hit count. $report"
+  else
+    aname=cw-coder; atools="view_file, grep_search, find_by_name, list_dir, write_to_file, replace_file_content, multi_replace_file_content, run_command"
+    sp="$pin Change only what the task asks: no refactors, renames, reformatting or new comments. After each edit, view the changed lines once to confirm them. $sp"
+  fi
+  mkdir -p "$ah/.gemini/antigravity-cli/agents"
+  put "$ah/.gemini/antigravity-cli/agents/$aname.md" "$(printf -- '---\nname: %s\ndescription: cw-crew %s\ntools: [%s]\n---\n# Instructions\n%s' "$aname" "$role" "$atools" "$sp")"
 fi
 
 
@@ -220,13 +294,49 @@ ev='fromjson? |
     cin:.usage.cache_read_input_tokens,nin:((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
     win:([.modelUsage[]?.contextWindow // empty] | max)}
   else empty end | .t=(now*1000|floor)'
+if [ -n "$agy" ]; then
+  # agy stream-json -> the same compact events, and its result -> a Claude-shaped .json so everything below works unchanged.
+  agyev='fromjson? |
+    if .event=="init" then {e:"init", sid:.conversation_id}
+    elif .event=="step_update" then .step_update |
+      if .step_type=="tool" then
+        if .state=="ACTIVE" then {e:"tool",tool:.tool_name,
+          arg:((.tool_info.parameters // {} | .AbsolutePath // .SearchPath // .DirectoryPath // .SearchDirectory // .Query // .Pattern // "")|tostring|.[0:120])}
+        elif .state=="DONE" then {e:"ok"} elif .state=="ERROR" then {e:"error"} else empty end
+      elif .step_type=="agent_response" and .state=="DONE" then {e:"text",ctx:(.usage.input_tokens // 0)}
+      else empty end
+    elif .event=="result" then .result | {e:"result",ok:(.status=="SUCCESS" and (.response // "") != ""),sub:(.status|ascii_downcase),
+      sid:.conversation_id,turns:.num_turns,denied:(.denied_actions // [] | length),out:.usage.output_tokens,
+      cin:.usage.cache_read_tokens,nin:((.usage.input_tokens // 0) - (.usage.cache_read_tokens // 0))}
+    else empty end | .t=(now*1000|floor)'
+  where="Workspace: $dir"; [ ${#adddirs[@]} -gt 0 ] && where+=" (also readable: $(printf '%s ' "${adddirs[@]}" | sed 's/--add-dir //g'))"
+  # Deny rules match the command text, so `git -C . commit` or `python -c "os.system('git push')"` slip past them.
+  # This git config, inherited by every process the worker starts, sends any push to a dead URL and leaves git no
+  # identity, so commit, merge, rebase, cherry-pick, revert, am and stash fail. Reads and fetch still work.
+  (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL -u EMAIL \
+    HOME="$ah" SHELL="$(command -v bash)" GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.cw-no-push://.pushInsteadOf GIT_CONFIG_VALUE_0= \
+    GIT_CONFIG_KEY_1=user.useConfigOnly GIT_CONFIG_VALUE_1=true GIT_CONFIG_KEY_2=user.name GIT_CONFIG_VALUE_2= agy -p "$where."$'\n\n'"$task" --agent "$aname" --model "$agy" \
+    --dangerously-skip-permissions --output-format stream-json "${adddirs[@]+"${adddirs[@]}"}" ${resume:+--conversation "$resume"}) 2> "$log.err" \
+    | tee "$log.jsonl" | jq -Rc --unbuffered "$agyev" > "$log.events" 2>/dev/null
+  rc=${PIPESTATUS[0]}
+  jq -Rc --arg m "$model" 'fromjson? | select(.event=="result") | .result | ((.response // "") == "") as $empty
+    | {type:"result", is_error:(.status != "SUCCESS" or $empty),
+       subtype:(if .status != "SUCCESS" then (.status|ascii_downcase) elif $empty then "empty_response" else "success" end),
+       result:(.response // ""), session_id:.conversation_id, num_turns:.num_turns,
+       usage:{input_tokens:((.usage.input_tokens // 0) - (.usage.cache_read_tokens // 0)), cache_creation_input_tokens:0,
+         cache_read_input_tokens:(.usage.cache_read_tokens // 0), output_tokens:(.usage.output_tokens // 0)},
+       modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
+    "$log.jsonl" | tail -1 > "$log.json"
+else
 printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" CLAUDE_CODE_SHELL="$(command -v bash)" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
   | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
 rc=${PIPESTATUS[1]}
 jq -Rc 'fromjson? | select(.type=="result")' "$log.jsonl" | tail -1 > "$log.json"
+fi
 sid=$(jq -r '.session_id // empty' "$log.json" 2>/dev/null); [ -n "$sid" ] && printf '%s\n' "$dir" > "$logdir/dirs/$sid"
+[ -n "$sid" ] && [ -n "$agy" ] && printf '%s\n' "$ah" > "$logdir/dirs/$sid.agy"   # its conversation lives in that home
 # Lines this run changed (untracked files included), for the crew pane.
 tree1=$(snap)
 if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then

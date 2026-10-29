@@ -327,7 +327,10 @@ export const clock = (ms: number) => {
 // Token counts as memobar writes them: 950, 50.0k, 1.2M.
 export const kilo = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)))
 export const usd = (n: number) => (n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`)
-export const shortModel = (m: string) => /haiku|sonnet|opus|fable/i.exec(m)?.[0].toLowerCase() ?? m
+export const shortModel = (m: string) => {
+  const k = /haiku|sonnet|opus|fable|gemini/i.exec(m)?.[0].toLowerCase()
+  return k ? (/-4-6/.test(m) ? `${k}4.6` : k) : m   // agy's Claude 4.6 tiers next to Claude 5.5
+}
 const shorten = (s: string, n: number) => {
   const one = s.replace(/\s+/g, ' ').trim()
   return [...one].length <= n ? one : '…' + [...one].slice(-(n - 1)).join('')

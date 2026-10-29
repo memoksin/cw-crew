@@ -20,7 +20,7 @@ Claude Code plugin: `orchestrate` skill + `cw` worker CLI + crew pane (hooks mod
 ## Rules
 
 - No user-specific paths or names. Personal setup goes through env (`CW_*`), documented in README's table.
-- Nothing leaves the machine by default. Jev (OpenRouter) stays opt-in via `CW_JEV=1`.
+- Nothing leaves the machine by default. Jev (OpenRouter) stays opt-in via `CW_JEV=1`, agy tiers (Google) via `CW_AGY=1`.
 - `cw` and `cwwait` bodies stay inside one `{ }` block: editing them must not break running workers.
 - Roles: scout, coder, reviewer. A new role touches `bin/cw`, the `[cw (scout|coder|reviewer) ` regexes in cwls/cwopen/cwkill, `Role` in `scene.ts`, `creatures.ts` + `tools/dump.ts` (then `tools/gen_frames.sh`).
 - Worker safety tiers live in `bin/cw` (deny / ask / allow). Never widen deny; `cwkill` only stops the worker's own tree or `CW_KILL_ALLOW` prefixes.
