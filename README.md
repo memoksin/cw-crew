@@ -93,6 +93,7 @@ makes git push and commit fail. A destructive command in another syntax can stil
 | `CW_FLEET` | `$CW_LOG_DIR/fleet/<repo>` | fleet dir |
 | `CW_WT_ROOT` | `../<repo>-wt` | worktree root |
 | `CW_JEV` | 0 | `1` = Jev (OpenRouter) picks worker effort per task. **Sends the first 20k characters of each task to OpenRouter.** Off: role default (scout low, coder medium) |
+| `CW_JEV_SURE` | 70 | Jev probability (%) needed to pick `high`; a less sure `high` runs at `medium` |
 | `OPENROUTER_API_KEY` / `CW_JEV_KEYCHAIN` | — | key for `CW_JEV=1`; on macOS a keychain service name works instead of the env key |
 | `CW_KILL_ALLOW` | — | colon-separated command prefixes `cwkill` may also stop |
 | `CW_ACCEPT_FAIL_RE` | `^\s*(FAIL\b(?!:? *0\b)\|SCRIPT ERROR)` | Perl regex: a `-T` run that exits 0 but prints a matching line is `accept=FAIL(output)`. Empty turns it off |

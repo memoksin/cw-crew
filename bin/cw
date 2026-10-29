@@ -203,8 +203,11 @@ fi
 
 # Effort: an explicit -e wins; a resume keeps the effort of the run it continues; otherwise, only with CW_JEV=1,
 # Jev picks it from the spec (OpenRouter decisions API, ~1 s, ~$0.00002; sends the first 20k chars of the task).
+# Jev must be sure (p >= CW_JEV_SURE %, default 70) to pick high; a less sure high runs at medium, since a run that
+# falls short is retried higher (on past runs this matched a blind review better: 23/26 vs 20/26).
+# agy runs skip Jev: agy takes no --effort.
 # Off or any failure: the role default.
-effort_src=flag; effort_p=""
+effort_src=flag; effort_p=""; effort_jev=""
 if [ "$effort" = auto ]; then
   [ "$role" = coder ] && effort=medium || effort=low
   effort_src=default
@@ -212,14 +215,14 @@ if [ "$effort" = auto ]; then
   [ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
   if [ -n "$prev" ] && [ -f "${prev%.json}.meta" ] && pe=$(jq -re '.effort // empty' "${prev%.json}.meta" 2>/dev/null); then
     effort=$pe; effort_src=resume
-  elif [ "${CW_JEV:-0}" = 1 ] && key=${OPENROUTER_API_KEY:-$([ -n "${CW_JEV_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_JEV_KEYCHAIN" -w 2>/dev/null)}; [ -n "${key:-}" ]; then
-    req=$(jq -nc --arg m "${CW_JEV_MODEL:-typesafe/jev-1.13}" --arg role "$role" --arg spec "${spec:0:20000}" \
+  elif [ -z "$agy" ] && [ "${CW_JEV:-0}" = 1 ] && key=${OPENROUTER_API_KEY:-$([ -n "${CW_JEV_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_JEV_KEYCHAIN" -w 2>/dev/null)}; [ -n "${key:-}" ]; then
+    req=$(jq -nc --arg m "${CW_JEV_MODEL:-typesafe/jev-1.13}" --arg role "$role" --arg wm "$model" --arg spec "${spec:0:20000}" \
       --arg files "${files[*]+"${files[*]}"}" '{model: $m,
       state: {worker_role: $role,
-        worker_model: (if $role == "scout" then "Claude Haiku (read-only research)" elif $role == "reviewer" then "Claude Sonnet (read-only diff review)" else "Claude Sonnet (writes code, runs tests)" end),
+        worker_model: ($wm + (if $role == "scout" then " (read-only research)" elif $role == "reviewer" then " (read-only diff review)" else " (writes code, runs tests)" end)),
         files_given: $files, task_spec: $spec},
       questions: {effort: {type: "choice",
-        instructions: "How much reasoning effort should this headless worker get to finish `task_spec` correctly on the first try? Higher effort costs 2-4x more tokens and time, so pick the lowest level that is still likely to succeed.",
+        instructions: "How much reasoning effort should this headless worker get to finish `task_spec` correctly on the first try? Higher effort costs 2-4x more tokens and time, so pick the lowest level that is still likely to succeed. When torn between two levels, pick the lower one: a run that falls short is retried at a higher effort.",
         criteria: {
           low: "Mechanical or lookup work: one clear answer, a few files, no design decisions (count, grep and list, rename, small single-file function with a given test).",
           medium: "Normal multi-step work: several files or sources to read and connect, or a self-contained feature with edge cases, but the approach is clear.",
@@ -227,8 +230,10 @@ if [ "$effort" = auto ]; then
     if ans=$(printf '%s' "$req" | curl -sS -m 4 -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
           --data-binary @- https://openrouter.ai/api/alpha/decisions 2>/dev/null) \
        && pick=$(jq -re '.answers.effort.choice | select(. == "low" or . == "medium" or . == "high")' <<<"$ans" 2>/dev/null); then
-      effort=$pick; effort_src=jev
+      effort=$pick; effort_src=jev; effort_jev=$pick   # before the CW_JEV_SURE step-down
       effort_p=$(jq -r '.answers.effort.probabilities | to_entries | map("\(.key[0:1])\(.value * 100 | floor)") | join(" ")' <<<"$ans")
+      sure=$(jq -r --arg c "$pick" '(.answers.effort.probabilities[$c] // 1) * 100 | floor' <<<"$ans")
+      [ "$pick" = high ] && [ "$sure" -lt "${CW_JEV_SURE:-70}" ] && effort=medium
     else
       echo "cw: Jev effort pick failed, using $effort" >&2
     fi
@@ -255,9 +260,9 @@ PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd:
 title=$(printf '%s' "$task" | perl -ne 's/^\s*(#+\s*)?(goal|task)\s*:?\s*//i; if (/\S/) { print; exit }' | cut -c1-160)
 branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
-  --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg name "${CW_NAME:-}" \
+  --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
-  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}' \
+  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}' \
   > "$log.meta"
 # Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
 ( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &

@@ -151,7 +151,7 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 
 ## Effort
 
-- Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README). A resume keeps the effort of the run it continues.
+- Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README; `high` only when Jev is sure, `CW_JEV_SURE`; agy tiers skip it). A resume keeps the effort of the run it continues.
 - Override with `-e low|medium|high` only for a known reason: a fix-up after a failed attempt → `-e high`.
 - Never xhigh/max for workers: work that needs it, Opus does itself.
 

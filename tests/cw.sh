@@ -80,5 +80,18 @@ check "-M opus picks Opus 5.5" 'arg claude-opus-5-5'
 "$here/bin/cw" reviewer -M flash -W w1 </dev/null >/dev/null 2>"$t/err"
 check "reviewer refuses agy tiers" 'grep -q "reviewer stays on Claude" "$t/err"'
 
+# Jev: a sure high stays high, an unsure high runs at medium (fake curl answers for the decisions API).
+cat > "$t/bin/curl" <<'C'
+#!/usr/bin/env bash
+cat >/dev/null; printf '{"answers":{"effort":{"choice":"high","probabilities":{"low":0,"medium":%s,"high":%s}}}}' "$((100 - JEV_HIGH))e-2" "${JEV_HIGH}e-2"
+C
+chmod +x "$t/bin/curl"
+CW_JEV=1 OPENROUTER_API_KEY=x JEV_HIGH=90 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
+check "Jev sure high (90%) stays high" 'arg high'
+CW_JEV=1 OPENROUTER_API_KEY=x JEV_HIGH=60 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
+check "Jev unsure high (60%) runs at medium" 'arg medium && ! arg high'
+check "meta keeps Jev's own pick" 'jq -e ".effort_jev == \"high\" and .effort == \"medium\"" "$(command ls -t "$t"/logs/*.meta | head -1)" >/dev/null'
+rm -f "$t/bin/curl"
+
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
