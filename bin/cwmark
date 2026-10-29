@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# cwmark   the lead's correctness verdict on a worker run (read by cwstats).
+#          cwmark NAME|SID|LOGBASE ok|bad ["note"]
+set -uo pipefail
+
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+  echo "usage: cwmark NAME|SID|LOGBASE ok|bad [\"note\"]" >&2
+  exit 2
+fi
+
+target=$1
+verdict=$2
+note=${3:-}
+
+case "$verdict" in
+  ok|bad) ;;
+  *) echo "cwmark: verdict must be 'ok' or 'bad'" >&2; exit 2 ;;
+esac
+
+logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}
+fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
+
+base=""
+
+# 1. Fleet NAME: from $fleet/NAME.err, last log= path
+if [ -f "$fleet/$target.err" ]; then
+  line=$(grep 'log=' "$fleet/$target.err" 2>/dev/null | tail -1)
+  if [ -n "$line" ]; then
+    l=$(sed -nE 's/.*log=([^] ]+).*/\1/p' <<< "$line")
+    l=${l%\]}
+    l=${l%.json}
+    if [ -f "$l.meta" ] || [ -f "$l.json" ]; then
+      base=$l
+    elif [ -f "$logdir/$l.meta" ] || [ -f "$logdir/$l.json" ]; then
+      base="$logdir/$l"
+    elif [ -f "$logdir/$(basename "$l").meta" ] || [ -f "$logdir/$(basename "$l").json" ]; then
+      base="$logdir/$(basename "$l")"
+    fi
+  fi
+fi
+
+# 2. Session ID: newest .json in the log dir whose session_id matches
+if [ -z "$base" ] && [ -d "$logdir" ]; then
+  match=$(grep -rlE --include='*.json' "\"session_id\"[[:space:]]*:[[:space:]]*\"$target\"" "$logdir" 2>/dev/null | sort | tail -1)
+  if [ -n "$match" ]; then
+    base=${match%.json}
+  fi
+fi
+
+# 3. Log base path
+if [ -z "$base" ]; then
+  t=${target%.*}
+  if [ -f "$target.meta" ] || [ -f "$target.json" ]; then
+    base=$target
+  elif [ -f "$t.meta" ] || [ -f "$t.json" ]; then
+    base=$t
+  elif [ -f "$logdir/$target.meta" ] || [ -f "$logdir/$target.json" ]; then
+    base="$logdir/$target"
+  elif [ -f "$logdir/$t.meta" ] || [ -f "$logdir/$t.json" ]; then
+    base="$logdir/$t"
+  fi
+fi
+
+if [ -z "$base" ]; then
+  echo "cwmark: run '$target' not found" >&2
+  exit 2
+fi
+
+ok_bool=false
+[ "$verdict" = ok ] && ok_bool=true
+now=$(date +%s)
+
+jq -nc --argjson ok "$ok_bool" --arg note "$note" --argjson t "$now" \
+  '{"ok":$ok,"note":$note,"t":$t}' > "$base.verdict"
+
+echo "cwmark: $(basename "$base") $verdict"

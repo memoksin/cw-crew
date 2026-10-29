@@ -13,7 +13,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"DONE revie
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
-unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT
+unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
 fails=0
 ok() { echo "ok   $1"; }
 no() { echo "FAIL $1"; fails=$((fails + 1)); }
@@ -78,7 +78,7 @@ check "agy tier off: flash coder falls back to Sonnet" 'arg claude-sonnet-5-5 &&
 "$here/bin/cw" scout -M opus <<< "x" >/dev/null 2>&1
 check "-M opus picks Opus 5.5" 'arg claude-opus-5-5'
 "$here/bin/cw" reviewer -M flash -W w1 </dev/null >/dev/null 2>"$t/err"
-check "reviewer refuses agy tiers" 'grep -q "reviewer stays on Claude" "$t/err"'
+check "agy tier off: flash reviewer falls back to Sonnet" 'arg claude-sonnet-5-5 && grep -q "agy tiers are off" "$t/err" && grep -q "using claude-sonnet-5-5" "$t/err"'
 
 # Jev: a sure high stays high, an unsure high runs at medium (fake curl answers for the decisions API).
 cat > "$t/bin/curl" <<'C'
@@ -96,13 +96,13 @@ rm -f "$t/bin/curl"
 # agy runs out of quota mid-run with no file changes: cw reruns the task on Claude, and agy's rc 3 is not a QUESTION.
 cat > "$t/bin/agy" <<'A'
 #!/usr/bin/env bash
-case "$*" in *"/usage"*) printf 'Claude and GPT models\tFive Hour Limit Remaining\t90%%\tx\nClaude and GPT models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
+case "$*" in *"/usage"*) printf 'Gemini Models\tFive Hour Limit Remaining\t90%%\tx\nGemini Models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
 echo '{"event":"init","conversation_id":"agy-1"}'
 echo '{"event":"result","result":{"conversation_id":"agy-1","status":"ERROR","response":"","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1,"cache_read_tokens":9}}}'
 echo 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}' >&2; exit 3
 A
 chmod +x "$t/bin/agy"; rm -f "$t/args"
-CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" coder -M opus46 <<< "x" >/dev/null 2>"$t/err"; rc=$?
+CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "agy quota out mid-run: rerun on Claude Sonnet" 'arg claude-sonnet-5-5 && grep -q "rerunning on Claude" "$t/err" && [ $rc = 0 ]'
 rm -f "$t/bin/agy"
 

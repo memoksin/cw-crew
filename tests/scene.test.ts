@@ -374,3 +374,34 @@ test('a reviewer gets its own names, colour, owl in glasses and 20-turn budget',
   expect(lookAt('reviewer', 'claude-opus-5-5', 'think', 0, 0, 0).opus).toBe(false)
   expect(lookAt('coder', 'claude-opus-5-5', 'think', 0, 0, 0).opus).toBe(true)
 })
+
+test('an agy worker shows its quota gauge, home on the card and every home in the header', () => {
+  const agy = {
+    home: 'cw-agy', bucket: 'Claude and GPT models', five: 94, week: 97,
+    homes: [
+      { home: 'cw-agy', gemini_five: 97, gemini_week: 99, claude_five: 94, claude_week: 97 },
+      { home: 'cw-agy-plus', gemini_five: null, gemini_week: 100, claude_five: null, claude_week: 100 },
+    ],
+  }
+  const run: Run = { id: 'g', meta: meta({ model: 'agy/gemini-3.8-flash-high', agy: { ...agy, bucket: 'Gemini Models', five: 97, week: 99 } }), events: [{ e: 'init', t: T0 * 1000 + 100 }] }
+  const now = T0 * 1000 + 1000
+  const ws = buildWorkers([run], now)
+  expect(ws[0]!.win).toBe(1_048_576)
+  const q = gauges(ws[0]!, now)[0]!
+  expect([q.name, q.value, q.note]).toEqual(['quota', 'gem 97%', 'cw-agy: 5h 97% · wk 99%'])
+  expect(Math.round(q.f * 100)).toBe(3)
+  const cl = buildWorkers([{ ...run, meta: meta({ agy }) }], now)
+  expect(gauges(cl[0]!, now)[0]?.value).toBe('cl 94%')
+  const at = (words: Uint32Array, cols: number) => String.fromCodePoint(...Array.from({ length: words.length / 3 }, (_, i) => words[i * 3] ?? 32))
+  const wide = at(drawScene(ws, 120, now).words, 120)
+  expect(wide).toContain('agy cw-agy G97 C94 · cw-agy-plus G100 C100')
+  expect(wide).toContain('gemini · cw-agy')
+  const narrow = at(drawScene(ws, 40, now).words, 40)
+  expect(narrow).not.toContain('agy cw-agy')
+  const detail = at(drawDetail(ws[0]!, 100, now).words, 100)
+  expect(detail).toContain('quota')
+  // a worker without agy meta: no quota gauge, no agy header
+  const plain = buildWorkers([{ id: 'p', meta: meta(), events: [{ e: 'init', t: T0 * 1000 + 100 }] }], now)
+  expect(gauges(plain[0]!, now).map(g => g.name)).toEqual(['context', 'turns', 'time'])
+  expect(at(drawScene(plain, 120, now).words, 120)).not.toContain('agy')
+})

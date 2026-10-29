@@ -21,7 +21,11 @@ export type Meta = {
   name?: string   // fleet name from cwgo (CW_NAME): shown instead of a generated one
   effort_p?: string; maxt?: number; branch?: string; wt?: string
   cont?: boolean  // an auto-continue after the turn limit
+  agy?: AgyMeta   // agy runs: the Google quota read before the run
 }
+export type AgyHome = { home: string; gemini_five: number | null; gemini_week: number | null; claude_five: number | null; claude_week: number | null }
+// Percent remaining; null when the /usage line was missing. `homes`: every home checked for this run, in order.
+export type AgyMeta = { home: string; bucket: string; five: number | null; week: number | null; homes: AgyHome[] }
 export type Run = { id: string; meta: Meta; events: Ev[]; rc?: number; doneAt?: number; question?: string }
 
 export type Worker = {
@@ -36,6 +40,7 @@ export type Worker = {
   cost?: number; cin: number; nin: number
   add: number; del: number; files: number
   accept?: { ok: boolean; rc?: number }
+  agy?: AgyMeta
 }
 
 const NAMES: Record<Role, string[]> = {
@@ -148,6 +153,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       start: renamed ? run.meta.start * 1000 : prev?.start ?? run.meta.start * 1000,
       runStart: run.meta.start * 1000,
       tmo: run.meta.tmo,
+      agy: run.meta.agy,
       resumed: !!prev,
       ...view,
       trail: [...(prev?.trail ?? []), ...view.trail],
@@ -164,7 +170,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       conts: (prev?.conts ?? 0) + (run.meta.cont ? 1 : 0),
       // A resume continues the same conversation: until its first step the context is the last run's.
       ctx: view.ctx || prev?.ctx || 0,
-      win: view.win || prev?.win || windows.get(run.meta.model) || (/\[1m\]/i.test(run.meta.model) ? 1_000_000 : 200_000),
+      win: view.win || prev?.win || windows.get(run.meta.model) || (/\[1m\]/i.test(run.meta.model) ? 1_000_000 : /gemini/i.test(run.meta.model) ? 1_048_576 : 200_000),
       cost: prev?.cost === undefined && view.cost === undefined ? undefined : (prev?.cost ?? 0) + (view.cost ?? 0),
       cin: (prev?.cin ?? 0) + view.cin, nin: (prev?.nin ?? 0) + view.nin,
       add: (prev?.add ?? 0) + view.add, del: (prev?.del ?? 0) + view.del, files: (prev?.files ?? 0) + view.files,
@@ -329,7 +335,7 @@ export const kilo = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >=
 export const usd = (n: number) => (n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`)
 export const shortModel = (m: string) => {
   const k = /haiku|sonnet|opus|fable|gemini/i.exec(m)?.[0].toLowerCase()
-  return k ? (/-4-6/.test(m) ? `${k}4.6` : k) : m   // agy's Claude 4.6 tiers next to Claude 5.5
+  return k ?? m
 }
 const shorten = (s: string, n: number) => {
   const one = s.replace(/\s+/g, ' ').trim()
@@ -367,11 +373,19 @@ function target(g: Grid, x: number, y: number, arg: string, max: number, bright:
 }
 
 // The three limits a run can hit. The turn limit and the clock hold per run; the context is the conversation's.
-export type Gauge = { name: 'context' | 'turns' | 'time'; short: string; f: number; value: string; note: string }
+export type Gauge = { name: 'context' | 'turns' | 'time' | 'quota'; short: string; f: number; value: string; note: string }
 export function gauges(w: Worker, now: number): Gauge[] {
   const ms = (w.end ?? now) - w.runStart, tmo = Math.max(1, w.tmo * 1000)
   const c = w.win ? w.ctx / w.win : 0
+  const q = w.agy
+  const quota: Gauge[] = !q ? [] : (() => {
+    const left = Math.min(q.five ?? 100, q.week ?? 100)
+    const tag = /^gemini/i.test(q.bucket) ? 'gem' : 'cl'
+    const win = [q.five !== null && `5h ${q.five}%`, q.week !== null && `wk ${q.week}%`].filter(Boolean).join(' · ')
+    return [{ name: 'quota', short: `${tag}`, f: 1 - left / 100, value: `${tag} ${left}%`, note: `${q.home}${win ? `: ${win}` : ''}` }]
+  })()
   return [
+    ...quota,
     { name: 'context', short: 'ctx', f: c, value: `${Math.round(c * 100)}%`, note: w.ctx ? `${kilo(w.ctx)} / ${kilo(w.win)}` : '' },
     { name: 'turns', short: 'turns', f: w.runTurns / Math.max(1, w.maxTurns), value: `${w.runTurns}/${w.maxTurns}`, note: w.conts ? `continued ×${w.conts}` : '' },
     { name: 'time', short: 'time', f: ms / tmo, value: w.end !== undefined ? clock(ms) : `${clock(tmo - ms)} left`, note: `of ${clock(tmo)}` },
@@ -466,6 +480,9 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
   const room = () => clockX - x - 2
   if (room() > 2) x += g.text(x, row(0), ' ›', ink(DIM), room())
   if (room() > 7) x += 2 + g.text(x + 2, row(0), shortModel(w.model), ink(DIM), room() - 2)
+  // the agy home next to the model, dropped first when narrow
+  const ahome = w.agy?.home
+  if (ahome && room() > 10 + [...ahome].length) x += 1 + g.text(x + 1, row(0), `· ${ahome}`, ink(FAINT), room() - 1)
   const eff = EFFORT[w.effort]
   if (eff && room() > 4) {
     x += 1
@@ -559,6 +576,10 @@ function header(g: Grid, ws: Worker[], now: number, totals: Totals) {
     const b = Math.floor((tt - from) / BK)
     if (b >= 0 && b < SPAN) per[b] = (per[b] ?? 0) + 1
   }
+  // agy workers on screen: the newest agy run's latest reading per home (5h when known, else weekly)
+  const newest = ws.filter(w => w.agy && w.agy.homes.length).sort((a, b) => b.runStart - a.runStart)[0]?.agy
+  const pc = (a: number | null, b: number | null) => a ?? b
+  const agyText = newest ? 'agy ' + newest.homes.map(h => `${h.home} G${pc(h.gemini_five, h.gemini_week) ?? '-'} C${pc(h.claude_five, h.claude_week) ?? '-'}`).join(' · ') : ''
   const money = totals.cost !== undefined && totals.cost > 0 ? usd(totals.cost) : ''
   const share = totals.limit !== undefined && totals.limit >= 0.5 ? `5h ~${Math.round(totals.limit)}%` : ''
   let right = g.w - 1
@@ -570,6 +591,8 @@ function header(g: Grid, ws: Worker[], now: number, totals: Totals) {
     if (x + 1 + [...s].length + 2 >= right - 1) break
     x += 1 + g.pill(x + 1, 0, s, c === WARN ? mix(c, 0xffffff, 0.2 * pulse(now, 1600)) : c, mix(PANE, c, 0.16))
   }
+  // agy quota only when the full sparkline still fits after it: it goes before the existing parts
+  if (agyText && x + 2 + [...agyText].length + 2 + SPAN + 2 < right) x += 2 + g.text(x + 2, 0, agyText, DIM)
   // the counts first; the sparkline takes what room is left
   const n = Math.min(SPAN, right - x - 2)
   if (ws.length && n >= 6) {

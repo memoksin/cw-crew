@@ -15,27 +15,27 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 | `coder` | read, edit, write, shell; commit/push/reset/clean blocked | implement a spec, run its tests |
 | `reviewer` | Read, read-only Bash; no web, no edits. cw inlines the diff | second pair of eyes on a finished diff, fresh context |
 
-Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on Claude (`-M haiku|sonnet|opus` only).
+Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on its own model unless `-M` names a tier (`-M flash`: see Reviewer).
 
 ## Tiers (`-M`): spend Google quota first, Claude last
 
 Pick the lowest tier likely to get it right on the first try. agy tiers run on the Antigravity CLI (Google AI plan); they do not touch Claude limits.
 
-Tiers 1-3 are opt-in: they need `CW_AGY=1` in the user's env. Check once per session: `echo ${CW_AGY:-0}`. Off: use only `haiku`, `sonnet`, `opus` and skip the agy rules below; scouts default to `haiku`.
+Tier 1 is opt-in: it needs `CW_AGY=1` in the user's env. Check once per session: `echo ${CW_AGY:-0}`. Off: use only `haiku`, `sonnet`, `opus` and skip the agy rules below; scouts default to `haiku`.
 
 | Tier | `-M` | Quota | Scout | Coder |
 |---|---|---|---|---|
 | 1 | `flash` (Gemini 3.8 Flash) | agy Gemini | default: lookups, call sites, file:line answers | trivial: 1 file, a few lines, exact spec, a given check |
-| 2 | `sonnet46` (Claude Sonnet 4.6) | agy Claude/GPT | needs judgement: summarize a design, compare options | small: 1-3 files, clear approach |
-| 3 | `opus46` (Claude Opus 4.6) | agy Claude/GPT | hard reading: subtle flow across many files | normal feature with a clear spec, scoped bug |
-| 4 | `sonnet` (Sonnet 5.5) | Claude | `-w` web research uses `haiku` | hard: cross-file refactor, unknown-cause bug, retry after a tier 1-3 failure; tasks needing `-a` |
-| 5 | `opus` (Opus 5.5) | Claude | — | rare: see Opus coder below |
+| 2 | `sonnet` (Sonnet 5.5); scouts: `haiku` | Claude | `haiku`: web research (`-w`), reading that needs judgement, a retry after a weak flash report | everything above trivial: features, bugs, refactors, a retry after a flash failure, tasks needing `-a` |
+| 3 | `opus` (Opus 5.5) | Claude | — | rare: see Opus coder below |
 
-- The agy Claude/GPT bucket is small: two Opus 4.6 coder runs (~2.4M tokens, mostly cache reads) used a whole 5-hour window and half the week on a Pro plan. Use `sonnet46`/`opus46` for short runs (scouts, a few-file fix); give long coder tasks to `sonnet`. Gemini quota is far larger.
+- agy also serves Claude models, but cw does not offer them: that quota bucket is tiny (two Opus 4.6 coder runs used a whole 5-hour window and half the week on a Pro plan). Gemini quota is far larger.
+- Explore mode: when `CW_AGY_EXPLORE` holds a date (YYYY-MM-DD) that is today or later, the user is tuning Gemini prompts. Keep every task on the tier it needs (quality first), and add flash work next to it: a self-contained slice of a sonnet job (a helper, a test, a lookup the spec needs), or now and then a slightly bigger task to probe what flash can do. Use real work only, no made-up tasks. After you check each flash report, record it: `cwmark NAME ok|bad "why"`.
 
 - Defaults: scout `flash` with `CW_AGY=1` (`haiku` with `-w` or when off), coder `sonnet`. Always pass `-M` for coders.
-- Do not hold back tiers 4-5 when the task needs them: a failed cheap run plus a retry costs more than one right run.
+- Do not hold back tiers 2-3 when the task needs them: a failed cheap run plus a retry costs more than one right run.
 - Failed or weak result on an agy tier: rerun one tier up with what went wrong. An agy session resumes (`-r`) only on agy.
+- Keep agy jobs small: every turn resends the whole context, so a long run costs far more than its window use shows (the Gemini window is 1M; one 97-turn run read 10M cached tokens). Split a job that needs more than ~40 turns or ~100k context.
 - cw falls back to the role's Claude model (scout `haiku`, coder `sonnet`) on its own when agy is missing, the run uses `-w` or `-a`, or no agy home (one per Google account, `CW_AGY_HOME`) has quota at or above `CW_AGY_MIN` % (default 5). Homes are tried in order. The note `cw: ..., using <model>` goes to stderr. Quota of every home: `cwagy`.
 - agy coder safety is weaker than Claude's auto mode: deny rules match the command text (cw's ask rules are denied there too), and git push/commit are blocked by env. A `git reset --hard` or `rm` in another syntax can still run. Give agy coders small, git-free tasks; on an important repo use `-W`. They cannot get `-a` grants: a PERMISSION from an agy coder means rerun on `sonnet` with `-a`.
 - agy scouts can read files outside the repo (the prompt pins them to it). Tasks and the files they read go to Google.
@@ -84,6 +84,7 @@ cw scout|coder|reviewer [-M tier] [-C dir] [-W name] [-B ref] [-r sid] [-t sec] 
 cwgo NAME coder [cw options...] -- specs/common.md specs/NAME.md   # (run_in_background) runs one worker; spec files are joined in order
 cwgo NAME2 coder -r <sid> <<< "Fix: ..."                           # (run_in_background) resume
 cwgo -d NAME ...  # start and return at once; then cwwait reports it
+cwgo -A NAME coder -W NAME -T '<acceptance>' -- specs/NAME.md   # finished + accept=pass: applies itself to the main tree (heavy diff: after a clean reviewer), reruns -T there, reverts on failure
 cwwait        # (run_in_background) fires when ANY unreported fleet worker finishes; recovery after a lost notification
 cwls          # table: running / done / QUESTION / PERMISSION / TIMEOUT / ACCEPT_FAIL, time, turns, sid
 cwopen        # unanswered QUESTION / PERMISSION requests (answered = resumed after the ask)
@@ -120,6 +121,7 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 - `SUGGEST` → take what is cheap and right, drop the rest. `UNSURE` → check it yourself before acting.
 - Cost: one reviewer per diff, ~3k cold start plus the diff, usually under 5 turns (limit 20). Never resume a reviewer for a new diff: a fresh one is cheaper and keeps its context clean. Default effort `low`; `-e medium` for security or data-loss risk.
 - Haiku (`CW_REVIEWER_MODEL=claude-haiku-5-5`) only for mechanical checks against an explicit list.
+- `-M flash` runs the reviewer on Gemini (agy) with read-only tools; in explore mode (`CW_AGY_EXPLORE`), run it as a shadow next to the Sonnet reviewer on the same diff, act only on the Sonnet verdict, and `cwmark` the flash review (ok = same blockers or a real extra one; bad = a missed blocker or a false blocker).
 
 ## Cost model (measured)
 
@@ -189,7 +191,7 @@ Default for 2+ background workers. Never wait for the whole fleet.
 2. Each worker's notification carries its meta and report, or its question.
 3. When one fires: read the report, `cwwt diff NAME --stat`, risky hunks, screenshots if visual. `accept=pass` already ran its tests in its tree. Risky diff → `cwgo NAME.rv reviewer -W NAME -- <spec files>` (background) and review the rest while it runs.
 4. PERMISSION (rc=4) or QUESTION (rc=3) → answer it first (see above), resume with `cwgo NAME.fix coder -r <sid> <<< "..."` (background), back to 3.
-5. Not good enough → resume the same worker right away with the exact issues. Good → `cwwt apply NAME`, rerun the affected tests in the main tree, commit if the user allows, `cwwt rm NAME`.
+5. Not good enough → resume the same worker right away with the exact issues. Good → `cwwt apply NAME`, rerun the affected tests in the main tree, commit if the user allows, `cwwt rm NAME`. With `cwgo -A`, light diffs apply on their own and heavy ones after a clean review; read the `=== APPLIED` line and spot-check risky hunks with `git diff`.
 6. Lost track (context compacted, a notification missed)? `cwls` and `cwopen`, or one background `cwwait`, report whatever is still unreviewed.
 7. After each review, tell the user in 3-5 lines: what landed, what went back for fixes and why, what is still running.
 
@@ -201,6 +203,7 @@ The lead's own work (shared helpers, specs, merges) goes on between notification
 - `denied>0` → it was blocked. Check why in the log, then widen the spec or do that step yourself.
 - Fails → `-r <sid>` with the exact failure. Second failure → do it yourself or rewrite the spec.
 - Scout reports can be wrong. Spot-check facts a decision depends on.
+- After checking a report, `cwmark NAME ok|bad "why"` (one short reason on bad).
 
 ## Rules
 

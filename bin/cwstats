@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# cwstats — local telemetry report over cw's run logs.
+#   cwstats [--days N] [--export]
+set -uo pipefail
+logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}
+days=14; export_json=0
+while [ $# -gt 0 ]; do case $1 in
+  --days) days=$2; shift 2 ;; --export) export_json=1; shift ;; *) echo "usage: cwstats [--days N] [--export]" >&2; exit 2 ;; esac; done
+
+pluginj=$(cd "$(dirname "$0")/.." && pwd)/.claude-plugin/plugin.json
+cw_version=""; [ -f "$pluginj" ] && cw_version=$(jq -r '.version // ""' "$pluginj" 2>/dev/null)
+
+cutoff=$(( $(date +%s) - days * 86400 ))
+
+# Build a combined JSON stream: one object per run, then pipe to one jq -n.
+# Perl collects all fields per run base, emits one JSON line each. Fast: no jq per run.
+perl -MJSON::PP -e '
+  use strict; use warnings;
+  my $logdir = $ARGV[0]; my $cutoff = $ARGV[1];
+  opendir my $dh, $logdir or die "cwstats: cannot open $logdir: $!\n";
+  my %bases;
+  while (my $f = readdir $dh) {
+    next unless $f =~ /^(\d{8}-\d{6}-\w+-\d+)\.(meta|json|done|ask|events|verdict)$/;
+    $bases{$1}{$2} = 1;
+  }
+  closedir $dh;
+  my $j = JSON::PP->new->utf8->canonical;
+
+  for my $b (sort keys %bases) {
+    my %has = %{$bases{$b}};
+    next unless $has{meta};
+    my $mf = "$logdir/$b.meta";
+    open my $fh, "<", $mf or next;
+    my $raw = do { local $/; <$fh> }; close $fh;
+    my $m = eval { $j->decode($raw) } or next;
+    my $start = $m->{start} // 0;
+    next if $start < $cutoff;
+
+    my %r;
+    $r{base}       = $b;
+    $r{role}       = $m->{role}       // "";
+    $r{model}      = $m->{model}      // "";
+    $r{session}    = $m->{session}    // "";
+    $r{resume}     = $m->{resume}     // "";
+    $r{task}       = $m->{task}       // "";
+    $r{start}      = $start;
+    $r{effort}     = $m->{effort}     // "";
+    $r{effort_src} = $m->{effort_src} // "";
+    $r{effort_jev} = $m->{effort_jev} // "";
+    $r{cont}       = $m->{cont}       ? 1 : 0;
+
+    # .json result
+    if ($has{json}) {
+      my $jf = "$logdir/$b.json";
+      if (open my $jh, "<", $jf) {
+        my $jr = do { local $/; <$jh> }; close $jh;
+        if (length($jr) > 2) {
+          my $jo = eval { $j->decode($jr) };
+          if ($jo) {
+            $r{subtype}    = $jo->{subtype}    // "";
+            $r{is_error}   = $jo->{is_error}   ? 1 : 0;
+            $r{num_turns}  = $jo->{num_turns}  // 0;
+            $r{cost}       = $jo->{total_cost_usd} if defined $jo->{total_cost_usd};
+            $r{dur_ms}     = $jo->{duration_ms} if defined $jo->{duration_ms};
+            $r{session_id} = $jo->{session_id} // "";
+            my $res = $jo->{result};
+            $r{result_str} = ref($res) ? "" : ($res // "");
+          }
+        }
+      }
+    }
+    $r{has_json} = $has{json} ? 1 : 0;
+
+    # .done
+    if ($has{done}) {
+      my $df = "$logdir/$b.done";
+      if (open my $dh2, "<", $df) { my $rc = <$dh2> // ""; close $dh2; $r{done_rc} = $rc + 0 if $rc =~ /^\d+/; }
+    }
+    $r{has_ask} = $has{ask} ? 1 : 0;
+
+    # .verdict
+    $r{marked} = 0;
+    $r{right}  = 0;
+    if ($has{verdict}) {
+      my $vf = "$logdir/$b.verdict";
+      if (open my $vh, "<", $vf) {
+        my $vr = do { local $/; <$vh> }; close $vh;
+        if (defined $vr && length($vr) > 2) {
+          my $vo = eval { $j->decode($vr) };
+          if ($vo && ref($vo) eq "HASH") {
+            $r{marked} = 1;
+            $r{right}  = $vo->{ok} ? 1 : 0;
+          }
+        }
+      }
+    }
+
+    # .events: scan for accept_end, error, tool, last event t
+    if ($has{events}) {
+      my $ef = "$logdir/$b.events";
+      if (open my $eh, "<", $ef) {
+        my ($last_t, $errs, $accept_ok, $accept_total) = (0, 0, 0, 0);
+        my @abs_tools;
+        while (<$eh>) {
+          my $ev = eval { $j->decode($_) } or next;
+          my $e = $ev->{e} // ""; my $t = $ev->{t} // 0;
+          $last_t = $t if $t > $last_t;
+          if ($e eq "accept_end") { $accept_total++; $accept_ok++ if $ev->{ok}; }
+          elsif ($e eq "error") { $errs++; }
+          elsif ($e eq "tool" && defined $ev->{arg} && $ev->{arg} =~ m{^/}) {
+            push @abs_tools, $ev->{arg};
+          }
+        }
+        close $eh;
+        $r{last_t}       = $last_t;
+        $r{err_events}   = $errs;
+        $r{accept_ok}    = $accept_ok;
+        $r{accept_total} = $accept_total;
+        # outside reads: abs path tools not under workdir
+        my $sid = $r{session_id} // "";
+        my $wdir = "";
+        if ($sid && -f "$logdir/dirs/$sid") {
+          if (open my $wfh, "<", "$logdir/dirs/$sid") {
+            chomp($wdir = <$wfh>); close $wfh;
+          }
+        }
+        my $outside = 0;
+        if ($wdir ne "") {
+          for my $p (@abs_tools) {
+            $outside++ unless index($p, "$wdir/") == 0 || $p eq $wdir;
+          }
+        }
+        $r{outside_reads} = $outside;
+      }
+    }
+    print $j->encode(\%r), "\n";
+  }
+' "$logdir" "$cutoff" | jq -rn --arg days "$days" --arg ver "$cw_version" --argjson export "$export_json" '
+# Read all runs
+[inputs] as $runs |
+
+# helpers
+def effort_rank:
+  if . == "low" then 1 elif . == "medium" then 2 elif . == "high" then 3
+  elif . == "xhigh" then 4 elif . == "max" then 5 else 0 end;
+def model_rank:
+  if test("gemini.*flash") then 1
+  elif test("haiku") then 1
+  elif test("claude-sonnet-4-6") then 2
+  elif test("claude-opus-4-6") then 3
+  elif test("claude-sonnet-5-5") then 4
+  elif test("claude-opus-5-5") then 5
+  else 0 end;
+
+def norm_task:
+  ascii_downcase | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | .[:60];
+
+# precompute session_ids from .json for resume matching
+($runs | map(select(.session_id != null and .session_id != "")) | map({(.session_id): .}) | add // {}) as $by_sid |
+
+# escalation: build lookup
+($runs | map({base, session, task, start, effort, model}) |
+  map(select(.session != null and .session != "" and (.task | length >= 12)) | . + {ntask: (.task | norm_task)}) |
+  group_by(.session) | map(select(length > 1)) | map(
+    . as $grp | [range(length)] | map(. as $i | $grp[$i] |
+      . as $a |
+      if [$grp[] | select(
+        .start > $a.start and (.start - $a.start) <= 21600 and
+        .ntask == $a.ntask and
+        ((.effort | effort_rank) > ($a.effort | effort_rank) or
+         (($a.model | model_rank) > 0 and (.model | model_rank) > ($a.model | model_rank)))
+      )] | length > 0 then $a.base else empty end
+    )
+  ) | flatten | map({(.): true}) | add // {}
+) as $esc_by_task |
+
+# escalation via resume: run A has sid, run B has resume==sid and effort_src=flag and higher effort
+($runs | map(select(.resume != "" and .effort_src == "flag")) |
+  map(. as $b |
+    [$runs[] | select(.session_id == $b.resume and ($b.effort | effort_rank) > (.effort | effort_rank))] |
+    map(.base) | .[]
+  ) | map({(.): true}) | add // {}
+) as $esc_by_resume |
+
+def is_escalated: .base as $b | ($esc_by_task[$b] // false) or ($esc_by_resume[$b] // false);
+
+# stats helpers
+def median: sort | if length == 0 then null elif length % 2 == 1 then .[length/2 | floor] else (.[length/2 - 1] + .[length/2]) / 2 end;
+def pct(n; d): if d == 0 then 0 else (n * 1000 / d | round) / 10 end;
+def fmt_cost: if . == null then "" elif . < 0.01 then "<$0.01" else "$" + (. * 100 | round | . / 100 | tostring | if test("\\.") then . else . + ".00" end | if test("\\.[0-9]$") then . + "0" else . end) end;
+def fmt_mins: if . == null then "" else (. | round | tostring) + "m" end;
+
+# ──────────────────── TABLE 1: by role, model, effort ────────────────────
+($runs | group_by(.role + "|" + .model + "|" + .effort) |
+  map(. as $grp | $grp[0] | {role, model, effort} |
+    . + {
+      runs: ($grp | length),
+      ok: ([$grp[] | select(.has_json == 1 and .is_error == 0 and .subtype == "success")] | length),
+      max_turns: ([$grp[] | select(.subtype == "error_max_turns")] | length),
+      timeout: ([$grp[] | select(.done_rc == 142)] | length),
+      ask: ([$grp[] | select(.has_ask == 1)] | length),
+      accept_pass: ([$grp[] | select((.accept_total // 0) > 0 and .accept_ok == .accept_total)] | length),
+      accept_total: ([$grp[] | select((.accept_total // 0) > 0)] | length),
+      right: ([$grp[] | select(.right == 1)] | length),
+      marked: ([$grp[] | select(.marked == 1)] | length),
+      escalated: ([$grp[] | select(is_escalated)] | length),
+      med_turns: ([$grp[] | select(.num_turns != null and .num_turns > 0) | .num_turns] | median),
+      med_cost: ([$grp[] | select(.cost != null) | .cost] | median),
+      med_mins: ([$grp[] |
+        (if .dur_ms != null and .dur_ms > 0 then .dur_ms
+         elif .last_t != null and .last_t > 0 and .start > 0 then .last_t - .start * 1000
+         else null end) | select(. != null and . > 0) | . / 60000
+      ] | median)
+    }
+  ) | sort_by(.role + .model + .effort)
+) as $t1 |
+
+# ──────────────────── TABLE 2: Jev effort ────────────────────
+($runs | map(select(.effort_src == "jev")) |
+  (
+    [
+      {label: "sure high",    runs: [.[] | select(.effort == "high")]},
+      {label: "stepped down", runs: [.[] | select(.effort_jev == "high" and .effort == "medium")]},
+      {label: "medium",       runs: [.[] | select(.effort == "medium" and (.effort_jev != "high" or .effort_jev == null or .effort_jev == ""))]},
+      {label: "low",          runs: [.[] | select(.effort == "low")]}
+    ] | map(. as $row | $row.runs as $grp |
+      {
+        label: $row.label,
+        runs: ($grp | length),
+        ok: ([$grp[] | select(.has_json == 1 and .is_error == 0 and .subtype == "success")] | length),
+        right: ([$grp[] | select(.right == 1)] | length),
+        marked: ([$grp[] | select(.marked == 1)] | length),
+        escalated: ([$grp[] | select(is_escalated)] | length),
+        med_turns: ([$grp[] | select(.num_turns != null and .num_turns > 0) | .num_turns] | median),
+        med_cost: ([$grp[] | select(.cost != null) | .cost] | median)
+      }
+    )
+  )
+) as $t2 |
+
+# ──────────────────── TABLE 3: agy prompt signals ────────────────────
+($runs | map(select(.model | test("^agy/"))) |
+  group_by(.model) | map(. as $grp | $grp[0].model as $mdl |
+    {
+      model: $mdl,
+      runs: ($grp | length),
+      empty: ([$grp[] | select(.has_json == 1 and (.subtype == "empty_response" or (.result_str // "") == ""))] | length),
+      md_links: ([$grp[] | select((.result_str // "") | test("\\]\\(file://"))] | length),
+      outside_reads: ([$grp[] | .outside_reads // 0] | add // 0),
+      tool_errs_mean: (
+        [$grp[] | .err_events // 0] |
+        if length == 0 then 0 else (add / length * 10 | round) / 10 end
+      )
+    }
+  ) | sort_by(.model)
+) as $t3 |
+
+if $export == 1 then
+  {
+    schema: 1,
+    cw_version: $ver,
+    days: ($days | tonumber),
+    tables: {
+      by_role_model_effort: [$t1[] | {role, model, effort, runs, ok_pct: pct(.ok; .runs), max_turns, timeout, ask, accept_pass, accept_total, right, marked, escalated_pct: pct(.escalated; .runs), med_turns, med_cost, med_mins}],
+      jev_effort: [$t2[] | {label, runs, ok_pct: pct(.ok; .runs), right, marked, escalated_pct: pct(.escalated; .runs), med_turns, med_cost}],
+      agy_signals: [$t3[] | {model, runs, empty, md_links, outside_reads, tool_errs_mean}]
+    }
+  }
+else
+
+# ──── format text tables ────
+def pad(n): tostring | . + (" " * (n - length)) | .[:n];
+def rpad(n): tostring | (" " * (n - length)) + . | .[-(n):];
+
+"By role / model / effort  (last " + $days + " days)\n" +
+"ROLE       MODEL                         EFFORT  RUNS  OK%   MTURNS TMO  ASK  ACCEPT    RIGHT  ESC%  ~TURNS ~COST   ~MINS\n" +
+([$t1[] |
+  (.role | pad(10)) +
+  (.model | pad(30)) +
+  (.effort | pad(8)) +
+  (.runs | rpad(5)) + " " +
+  (pct(.ok; .runs) | rpad(5)) + " " +
+  (.max_turns | rpad(6)) + " " +
+  (.timeout | rpad(4)) + " " +
+  (.ask | rpad(4)) + " " +
+  ((.accept_pass | tostring) + "/" + (.accept_total | tostring) | pad(9)) + " " +
+  ((if .marked == 0 then "" else (.right | tostring) + "/" + (.marked | tostring) end) | pad(6)) + " " +
+  (pct(.escalated; .runs) | rpad(5)) + " " +
+  ((.med_turns // "" | if . == "" then "" else (. | round) end) | rpad(6)) + " " +
+  (.med_cost | fmt_cost | rpad(7)) + " " +
+  (.med_mins | fmt_mins | rpad(5))
+] | join("\n")) + "\n\n" +
+
+"Jev effort\n" +
+"LABEL          RUNS  OK%   RIGHT  ESC%  ~TURNS ~COST\n" +
+([$t2[] |
+  (.label | pad(15)) +
+  (.runs | rpad(5)) + " " +
+  (pct(.ok; .runs) | rpad(5)) + " " +
+  ((if .marked == 0 then "" else (.right | tostring) + "/" + (.marked | tostring) end) | pad(6)) + " " +
+  (pct(.escalated; .runs) | rpad(5)) + " " +
+  ((.med_turns // "" | if . == "" then "" else (. | round) end) | rpad(6)) + " " +
+  (.med_cost | fmt_cost | rpad(7))
+] | join("\n")) + "\n\n" +
+
+"agy prompt signals\n" +
+"MODEL                       RUNS  EMPTY MDLNK OUTRD TERR/RUN\n" +
+([$t3[] |
+  (.model | pad(28)) +
+  (.runs | rpad(5)) + " " +
+  (.empty | rpad(5)) + " " +
+  (.md_links | rpad(5)) + " " +
+  (.outside_reads | rpad(5)) + " " +
+  (.tool_errs_mean | rpad(8))
+] | join("\n"))
+
+end
+'

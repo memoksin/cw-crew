@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# cwgo [-d] NAME ROLE [cw options...] [-- spec.md...]   start a cw worker as part of the fleet and wait for it
+# cwgo [-d] [-A] NAME ROLE [cw options...] [-- spec.md...]   start a cw worker as part of the fleet and wait for it
 #   Run it with run_in_background: the notification carries the report, or the worker's QUESTION/PERMISSION.
 #   -d: start and return at once (then cwwait reports it).
+#   -A: (coder with -W and -T only) when the worker ends DONE with accept=pass, apply its worktree diff to the main
+#       tree by itself, rerun -T there (reverted on failure), then cwwt rm. A heavy diff (CW_APPLY_LINES=150 changed
+#       lines, CW_APPLY_FILES=4 files, or a path matching CW_APPLY_RISKY) needs a clean Claude review first.
 #   Task = the spec files joined in order (shared parts first), or stdin when no files are given.
 #   Files go to the fleet dir: NAME.task / .out / .err / .pid. A NAME already used gets .2, .3, ...
 #   Fleet dir: $CW_FLEET, default ~/.claude/cw-runs/fleet/<repo or dir name>.
 #   Examples: cwgo l1 coder -W l1 -e high -T 'make test' -- specs/common.md specs/l1.md
+#             cwgo -A l1 coder -W l1 -T 'make test' -- specs/l1.md   (merges itself when safe)
 #             cwgo l1 coder -r <sid> <<< "Fix: ..."        (resume; runs in the session's own dir)
 # Env (CW_CODER_MODEL, CW_MAX_TURNS, ...) passes through to cw.
 set -uo pipefail
 die() { echo "cwgo: $*" >&2; exit 2; }
-detach=0; [ "${1:-}" = -d ] && { detach=1; shift; }
-[ $# -ge 2 ] || die "usage: cwgo [-d] NAME scout|coder [cw options...] [-- spec.md...]"
+detach=0; auto=0
+while [ "${1:-}" = -d ] || [ "${1:-}" = -A ]; do
+  if [ "$1" = -d ]; then detach=1; else auto=1; fi
+  shift
+done
+[ $# -ge 2 ] || die "usage: cwgo [-d] [-A] NAME scout|coder [cw options...] [-- spec.md...]"
 name=$1; shift
 case $name in *[!A-Za-z0-9._-]*) die "bad name: $name" ;; esac
 args=(); files=()
@@ -19,6 +27,16 @@ while [ $# -gt 0 ]; do
   if [ "$1" = -- ]; then shift; files=("$@"); break; fi
   args+=("$1"); shift
 done
+awt=""; aacc=""; root=""
+if [ "$auto" = 1 ]; then
+  i=0
+  while [ $i -lt ${#args[@]} ]; do
+    case ${args[i]} in -W) awt=${args[i+1]:-} ;; -T) aacc=${args[i+1]:-} ;; esac
+    i=$((i + 1))
+  done
+  { [ "${args[0]:-}" = coder ] && [ -n "$awt" ] && [ -n "$aacc" ]; } || die "-A needs role coder with both -W <name> and -T <cmd>"
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || die "-A needs a git repo"
+fi
 fleet=${CW_FLEET:-$HOME/.claude/cw-runs/fleet/$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
 mkdir -p "$fleet"
 n=$name; i=2
@@ -31,16 +49,66 @@ else
   die "no task: give spec files after -- or the task on stdin"
 fi
 [ -s "$fleet/$n.task" ] || die "empty task"
-CW_NAME=$n nohup "$(dirname "$0")/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
+here=$(dirname "$0")
+CW_NAME=$n nohup "$here/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
 pid=$!
 echo $pid > "$fleet/$n.pid"
 echo "started $n (pid $pid) in $fleet"
 [ "$detach" = 1 ] && exit 0
+
+tlimit() { local s=$1; shift; if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; else perl -e 'alarm shift; exec @ARGV' "$s" "$@"; fi; }
+noapp() { echo "=== NOT APPLIED $n: $*"; }
+# -A: merge a finished worktree worker into the main tree (see header)
+apply_worker() {
+  local cwwt=$here/cwwt meta first nums lines nfiles heavy=0 rv out patch lock stat rvtag="skipped (light)" w=0
+  meta=$(grep '^\[cw coder ' "$fleet/$n.err" | tail -1)
+  first=$(grep -m1 '[^[:space:]]' "$fleet/$n.out")
+  if grep -qE '^\[cw (ASK|PERM)' "$fleet/$n.err"; then noapp "worker has an open question or permission request"; return; fi
+  case $meta in *" rc=0 "*) ;; *) noapp "worker did not finish with rc=0"; return ;; esac
+  case $meta in *" accept=pass"*) ;; *) noapp "no accept=pass"; return ;; esac
+  case $first in *DONE*) ;; *) noapp "report is not DONE"; return ;; esac
+  nums=$(cd "$root" && "$cwwt" diff "$awt" --numstat) || { noapp "cannot diff worktree $awt"; return; }
+  [ -n "$nums" ] || { noapp "no changes"; return; }
+  lines=$(printf '%s\n' "$nums" | awk '{ if ($1 == "-") $1 = 0; if ($2 == "-") $2 = 0; s += $1 + $2 } END { print s + 0 }')
+  nfiles=$(printf '%s\n' "$nums" | wc -l | tr -d ' ')
+  [ "$lines" -ge "${CW_APPLY_LINES:-150}" ] && heavy=1
+  [ "$nfiles" -ge "${CW_APPLY_FILES:-4}" ] && heavy=1
+  printf '%s\n' "$nums" | cut -f3- | grep -qE "${CW_APPLY_RISKY:-auth|secret|token|passw|credential|permission|migrat|deny|security|\.env}" && heavy=1
+  if [ $heavy = 1 ]; then
+    { echo "Review against this task spec:"; cat "$fleet/$n.task"; } | (cd "$root" && CW_NAME=$n.rv "$here/cw" reviewer -W "$awt") > "$fleet/$n.rv.out" 2> "$fleet/$n.rv.err"
+    rv=$(grep -m1 '[^[:space:]]' "$fleet/$n.rv.out")
+    # exact verdicts: "10 blocker" or "BLOCKED: ... cleanly" must not pass
+    case $rv in *"review: 0 blocker"*|*"review: clean"*) rvtag=clean ;; *) noapp "review found blockers"; cat "$fleet/$n.rv.out"; return ;; esac
+  fi
+  lock=$fleet/.apply.lock
+  until mkdir "$lock" 2>/dev/null; do
+    w=$((w + 1)); [ $w -gt 7200 ] && { noapp "apply lock busy"; return; }
+    sleep 1
+  done
+  trap "rmdir '$lock' 2>/dev/null" EXIT   # expanded now: $lock is local, gone at exit
+  patch=$fleet/$n.patch
+  (cd "$root" && "$cwwt" diff "$awt" --binary) > "$patch"
+  if ! out=$(cd "$root" && git apply --check "$patch" 2>&1); then
+    noapp "does not apply cleanly"; echo "$out"; rmdir "$lock"; return
+  fi
+  stat=$(cd "$root" && git apply --stat "$patch" | tail -1)
+  (cd "$root" && git apply "$patch") || { noapp "git apply failed"; rmdir "$lock"; return; }
+  if out=$(cd "$root" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$aacc" 2>&1); then
+    (cd "$root" && "$cwwt" rm "$awt") >/dev/null 2>&1
+    echo "=== APPLIED $n:$stat, main accept=pass, review=$rvtag"
+  else
+    (cd "$root" && git apply -R "$patch")
+    echo "=== APPLY REVERTED $n: main-tree acceptance failed"; printf '%s\n' "$out" | tail -20
+  fi
+  rmdir "$lock"
+}
+
 # Wait for this one worker, so a lead that ran cwgo in the background gets one notification per
 # worker, questions included. A single shared cwwait had to be restarted after every notification.
 wait "$pid"; rc=$?
-if grep -q '^\[cw ' "$fleet/$n.err"; then "$(dirname "$0")/cwwait" "$fleet/$n.err"
+if grep -q '^\[cw ' "$fleet/$n.err"; then "$here/cwwait" "$fleet/$n.err"
 else echo "=== DIED without a result: $n"; tail -5 "$fleet/$n.err"; fi
 touch "$fleet/$n.seen"
 case $rc in 3|4) echo; echo "=== OPEN REQUEST from $n: answer it now (resume: cwgo $n.fix ROLE -r <sid> <<< \"...\") or close it (cwopen -x $n)" ;; esac
+[ "$auto" = 1 ] && apply_worker
 exit 0

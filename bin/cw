@@ -6,7 +6,7 @@
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
 #   -W name: run in a git worktree outside the repo (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
-#   -M tier: flash|sonnet46|opus46 (Antigravity CLI, Google AI quota) or haiku|sonnet|opus (Claude). See the tier block.
+#   -M tier: flash (Gemini on the Antigravity CLI, Google AI quota) or haiku|sonnet|opus (Claude). See the tier block.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
@@ -130,17 +130,16 @@ if [ ${#granted[@]} -gt 0 ]; then
       | $r]' "${granted[@]}" <<< "${ask:-[]}")
 fi
 
-# Tier (-M): flash, sonnet46, opus46 run on the Antigravity CLI (agy; Google AI plan quota) and need CW_AGY=1;
+# Tier (-M): flash runs Gemini on the Antigravity CLI (agy; Google AI plan quota) and needs CW_AGY=1;
 # haiku, sonnet, opus run on Claude. Default: coder sonnet; scout flash with CW_AGY=1, else (and with -w) haiku;
-# reviewer keeps CW_REVIEWER_MODEL unless -M names a Claude tier.
+# reviewer keeps CW_REVIEWER_MODEL unless -M names a tier (flash: Gemini, read-only tools).
 # An agy tier falls back to the role's Claude model when agy tiers are off, the run needs -w or -a, agy is missing,
 # or no home in CW_AGY_HOME has quota (5h and weekly) at or above CW_AGY_MIN percent.
 [ -n "$tier" ] || [ "$role" = reviewer ] || { if [ "$role" = coder ]; then tier=sonnet; elif [ -n "$web" ] || [ "${CW_AGY:-0}" != 1 ]; then tier=haiku; else tier=flash; fi; }
 agy=""
-[ "$role" = reviewer ] && case $tier in flash|sonnet46|opus46) echo "cw: agy tiers are for scouts and coders; reviewer stays on Claude" >&2; tier="" ;; esac
 case $tier in
   "") ;;
-  flash) agy=gemini-3.8-flash-high ;; sonnet46) agy=claude-sonnet-4-6 ;; opus46) agy=claude-opus-4-6-thinking ;;
+  flash) agy=gemini-3.8-flash-high ;;   # agy's Claude models are not offered: their quota bucket is tiny
   haiku) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; sonnet) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; opus) model=claude-opus-5-5 ;;
   *) usage ;;
 esac
@@ -148,7 +147,7 @@ if [ -n "$agy" ]; then
   # agy keeps settings and login under $HOME: each home in CW_AGY_HOME is a HOME of symlinks to the real one (see
   # cwagy) with cw's own settings.json (deny rules) and agents/. Tool commands see this HOME too.
   # Homes are tried in order: the first with quota left runs the task; a resume goes back to its session's home.
-  why=""; ah=""
+  why=""; ah=""; usage=""; agyhomes="[]"
   if [ "${CW_AGY:-0}" != 1 ]; then why="agy tiers are off (CW_AGY=1 turns them on)"
   elif [ -n "$web" ]; then why="agy tiers have no web tools"
   elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
@@ -159,7 +158,13 @@ if [ -n "$agy" ]; then
     IFS=: read -ra homes <<< "${CW_AGY_HOME:-$HOME/.claude/cw-agy}"; kind=first; notes=""
     for h in "${homes[@]}"; do
       "$here/cwagy" prep "$h" "$kind"; kind=extra
-      quota=$(cd "$h" && HOME=$h tlimit 15 agy -p /usage < /dev/null 2>/dev/null | awk -F'\t' -v b="$bucket" '$1 == b { v = $3 + 0; if (m == "" || v < m) m = v } END { print m }')
+      usage=$(cd "$h" && HOME=$h tlimit 15 agy -p /usage < /dev/null 2>/dev/null)
+      quota=$(awk -F'\t' -v b="$bucket" '$1 == b { v = $3 + 0; if (m == "" || v < m) m = v } END { print m }' <<< "$usage")
+      # every line of the output goes to .meta for the pane: percent remaining per bucket and window
+      pv() { awk -F'\t' -v b="$1" -v w="$2" '$1 == b && $2 ~ w { print $3 + 0; exit }' <<< "$usage"; }
+      agyhomes=$(jq -c --arg h "${h##*/}" --arg g5 "$(pv "Gemini Models" '^Five')" --arg gw "$(pv "Gemini Models" '^Weekly')" \
+        --arg c5 "$(pv "Claude and GPT models" '^Five')" --arg cw "$(pv "Claude and GPT models" '^Weekly')" \
+        '. + [{home: $h, gemini_five: ($g5 | tonumber? // null), gemini_week: ($gw | tonumber? // null), claude_five: ($c5 | tonumber? // null), claude_week: ($cw | tonumber? // null)}]' <<< "$agyhomes")
       if [ -z "$quota" ]; then notes+=" ${h##*/}: no quota (signed in? cwagy login $h)"
       elif [ "$quota" -lt "${CW_AGY_MIN:-5}" ]; then notes+=" ${h##*/}: $quota%"
       else ah=$h; break; fi
@@ -168,7 +173,9 @@ if [ -n "$agy" ]; then
   fi
   if [ -n "$why" ]; then
     [ -n "$resume" ] && { echo "cw: $why; an agy session cannot resume on Claude: rerun it fresh" >&2; exit 2; }
-    [ "$role" = scout ] && model=${CW_SCOUT_MODEL:-claude-haiku-5-5} || model=${CW_CODER_MODEL:-claude-sonnet-5-5}   # reviewer never gets here
+    if [ "$role" = scout ]; then model=${CW_SCOUT_MODEL:-claude-haiku-5-5}
+    elif [ "$role" = reviewer ]; then model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5}
+    else model=${CW_CODER_MODEL:-claude-sonnet-5-5}; fi
     echo "cw: $why, using $model" >&2; agy=""
   fi
 fi
@@ -188,14 +195,19 @@ if [ -n "$agy" ]; then
   deny+=("command(bash -c)" "command(sh -c)" "command(zsh -c)" "command(eval)")   # bare bash/sh/zsh rules: their -c bypass
   put() { [ "$(cat "$1" 2>/dev/null)" = "$2" ] || { printf '%s\n' "$2" > "$1.$$" && mv "$1.$$" "$1"; }; }   # atomic: runs share it
   put "$ah/.gemini/antigravity-cli/settings.json" "$(jq -n --args '{permissions: {deny: ($ARGS.positional | unique)}}' "${deny[@]}")"
-  # Gemini and the 4.6 models follow short prompts loosely: name the method, the stop point and the citation rule.
+  # Gemini follows short prompts loosely: name the method, the stop point and the citation rule.
   pin="Open and edit files only inside the workspace the task names; never touch the home directory, dotfiles or other projects. Cite path:line as plain text, no markdown links. No preamble, no restating the task."
   if [ "$role" = scout ]; then
     aname=cw-scout; atools="view_file, grep_search, find_by_name, list_dir"
     sp="You are a read-only research worker for an orchestrator. Do only the task. $pin Method: locate with grep_search or find_by_name, then view_file a line range around each hit; do not read whole large files. Files given inline in the task are already read: do not open them again. Stop as soon as every question in the task is answered; no extra exploration. Every fact cites path:line from a file you opened in this run; mark anything else NOT CHECKED. Never guess a name, path or number. A 'none found' claim names the search and its hit count. $report"
+  elif [ "$role" = reviewer ]; then
+    aname=cw-reviewer; atools="view_file, grep_search, find_by_name, list_dir"
+    sp="You are a read-only code reviewer for an orchestrator. Do only the task. $pin Judge only the inline diff against the task; read a file only to confirm a finding; stop after at most 10 findings; no praise, no summary of the change; a finding you could not confirm is UNSURE, never BLOCKER. Report real defects: wrong behavior, broken contract or spec rule, missing test, security. Skip style unless asked. Report: English, max 15 lines. Line 1: 'DONE review: N blocker, M suggest' or 'DONE review: clean'; 'BLOCKED <why>' if you could not review. Then one line per finding: 'BLOCKER path:line - problem; fix' or 'SUGGEST path:line - ...'. If a real ambiguity stops you, last line: QUESTION: <one question>."
   else
     aname=cw-coder; atools="view_file, grep_search, find_by_name, list_dir, write_to_file, replace_file_content, multi_replace_file_content, run_command"
-    sp="$pin Change only what the task asks: no refactors, renames, reformatting or new comments. After each edit, view the changed lines once to confirm them. $sp"
+    # Every turn resends the whole context: no sleep polling, no re-reading the same lines.
+    sp="${sp/ To wait for something*between checks./}"
+    sp="$pin Change only what the task asks: no refactors, renames, reformatting or new comments. After each edit, view only the changed lines once to confirm them. Run commands in the foreground and wait for their exit; never poll with sleep or re-check a command in a loop. View line ranges, not whole large files, and never view the same lines twice unless you changed them. $sp"
   fi
   mkdir -p "$ah/.gemini/antigravity-cli/agents"
   put "$ah/.gemini/antigravity-cli/agents/$aname.md" "$(printf -- '---\nname: %s\ndescription: cw-crew %s\ntools: [%s]\n---\n# Instructions\n%s' "$aname" "$role" "$atools" "$sp")"
@@ -263,7 +275,12 @@ branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
-  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}' \
+  --arg agyhome "${ah:+${ah##*/}}" --arg bucket "${bucket:-}" --argjson agyhomes "${agyhomes:-[]}" \
+  --arg a5 "$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Five/ { print $3 + 0; exit }' <<< "${usage:-}")" \
+  --arg aw "$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Weekly/ { print $3 + 0; exit }' <<< "${usage:-}")" \
+  --argjson isagy "$([ -n "$agy" ] && echo 1 || echo 0)" \
+  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
+  + (if $isagy == 1 then {agy: {home: $agyhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null), homes: $agyhomes}} else {} end)' \
   > "$log.meta"
 # Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
 ( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &
@@ -309,7 +326,7 @@ if [ -n "$agy" ]; then
         if .state=="ACTIVE" then {e:"tool",tool:.tool_name,
           arg:((.tool_info.parameters // {} | .AbsolutePath // .SearchPath // .DirectoryPath // .SearchDirectory // .Query // .Pattern // "")|tostring|.[0:120])}
         elif .state=="DONE" then {e:"ok"} elif .state=="ERROR" then {e:"error"} else empty end
-      elif .step_type=="agent_response" and .state=="DONE" then {e:"text",ctx:(.usage.input_tokens // 0)}
+      elif .step_type=="agent_response" and .state=="DONE" then {e:"text",ctx:((.usage.input_tokens // 0) + (.usage.cache_read_tokens // 0))}
       else empty end
     elif .event=="result" then .result | {e:"result",ok:(.status=="SUCCESS" and (.response // "") != ""),sub:(.status|ascii_downcase),
       sid:.conversation_id,turns:.num_turns,denied:(.denied_actions // [] | length),out:.usage.output_tokens,
@@ -326,10 +343,13 @@ if [ -n "$agy" ]; then
     | tee "$log.jsonl" | jq -Rc --unbuffered "$agyev" > "$log.events" 2>/dev/null
   rc=${PIPESTATUS[0]}
   [ "$rc" = 3 ] && rc=1   # agy model error; in cw rc 3 means QUESTION
-  jq -Rc --arg m "$model" 'fromjson? | select(.event=="result") | .result | ((.response // "") == "") as $empty
+  # agy counts one turn per prompt; count model responses so turns compare with Claude runs.
+  aturns=$(jq -Rn '[inputs | fromjson? | select(.event=="step_update" and .step_update.step_type=="agent_response" and .step_update.state=="DONE")] | length' "$log.jsonl")
+  jq -c --argjson n "$aturns" 'if .e=="result" then .turns=$n else . end' "$log.events" > "$log.events.tmp" && mv "$log.events.tmp" "$log.events"
+  jq -Rc --arg m "$model" --argjson n "$aturns" 'fromjson? | select(.event=="result") | .result | ((.response // "") == "") as $empty
     | {type:"result", is_error:(.status != "SUCCESS" or $empty),
        subtype:(if .status != "SUCCESS" then (.status|ascii_downcase) elif $empty then "empty_response" else "success" end),
-       result:(.response // ""), session_id:.conversation_id, num_turns:.num_turns,
+       result:(.response // ""), session_id:.conversation_id, num_turns:$n,
        usage:{input_tokens:((.usage.input_tokens // 0)), cache_creation_input_tokens:0,
          cache_read_input_tokens:(.usage.cache_read_tokens // 0), output_tokens:(.usage.output_tokens // 0)},
        modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
