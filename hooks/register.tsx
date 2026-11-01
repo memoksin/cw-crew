@@ -43,6 +43,9 @@ let polling = false
 let lastKick = 0
 // The run dir keeps every past run: list it once per session, then only live/ (cw's marker per running worker).
 let scanned = false
+// Nothing live or unfinished: poll() skips until this time (IDLE_MS), then looks again.
+let quietUntil = 0
+const IDLE_MS = 5000
 // Surfaces with no Raster (desktop, editor, mobile) get the scene as an Svg, redrawn by poll() while shown.
 let svgAt = 0
 let svgKick = 0
@@ -71,6 +74,7 @@ async function poll($: EngineInterface) {
       metas = new Map(); runs = new Map(); seen = new Map(); scanned = false
     }
     const now = await $.clock.now()
+    if (scanned && now < quietUntil) return
     const entries = scanned ? await watched($) : await $.fs.list(dir).catch(() => [])
     scanned = true
     const byName = new Map(entries.map(en => [en.name, en]))
@@ -161,6 +165,7 @@ async function watched($: EngineInterface) {
   for (const r of runs.values()) if (!r.final || r.question !== undefined) ids.add(r.id)
   const sel = selKey ? workers.find(w => w.key === selKey)?.runIds.at(-1) : undefined
   if (sel) ids.add(sel)
+  quietUntil = ids.size === 0 ? (await $.clock.now()) + IDLE_MS : 0
   const names = [...ids].flatMap(id => WATCHED.map(ext => `${id}.${ext}`))
   const stats = await Promise.all(names.map(name => $.fs.stat(`${dir}/${name}`).catch(() => undefined)))
   return names.flatMap((name, i) => {
