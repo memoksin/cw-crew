@@ -43,6 +43,11 @@ task=""; [ -t 0 ] || task=$(cat)
 [ -n "$task" ] || { echo "cw: empty task" >&2; exit 2; }
 case $effort in auto|low|medium|high|xhigh|max) ;; *) usage ;; esac
 logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}; mkdir -p "$logdir/dirs"
+# The crew pane lists $logdir on every poll: once a day, move run files older than 14 days aside.
+if [ -z "$(find "$logdir/dirs/.archived" -mtime -1 2>/dev/null)" ]; then
+  touch "$logdir/dirs/.archived"; mkdir -p "$logdir-archive"
+  find "$logdir" -maxdepth 1 -type f -mtime +14 -exec mv {} "$logdir-archive/" \; 2>/dev/null
+fi
 if [ -n "$wtname" ] && [ "$role" = reviewer ]; then
   dir=$(cd "$dir" && "$here/cwwt" path "$wtname") || { echo "cw: no worktree $wtname to review" >&2; exit 2; }
 elif [ -n "$wtname" ]; then

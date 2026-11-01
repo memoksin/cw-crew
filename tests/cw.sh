@@ -25,8 +25,11 @@ git init -q -b main && git config user.email t@t && git config user.name t
 printf 'one\ntwo\n' > a.txt && git add a.txt && git commit -qm init
 printf 'Spec: keep two lines.\n' > "$t/spec.md"
 
+mkdir -p "$CW_LOG_DIR"; touch -t 202001010000 "$CW_LOG_DIR/old.meta"; touch "$CW_LOG_DIR/new.meta"
 # Clean tree: nothing to review, claude never starts.
 "$here/bin/cw" reviewer <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "run files older than 14 days move to the archive" '[ -f "$CW_LOG_DIR-archive/old.meta" ] && [ ! -e "$CW_LOG_DIR/old.meta" ] && [ -f "$CW_LOG_DIR/new.meta" ]'
+rm -f "$CW_LOG_DIR/new.meta"
 check "clean tree exits 2" '[ $rc = 2 ] && grep -q "nothing to review" "$t/err" && [ ! -e "$t/args" ]'
 "$here/bin/cw" reviewer -w <<< "x" >/dev/null 2>&1
 check "reviewer refuses -w" '[ $? = 2 ]'
