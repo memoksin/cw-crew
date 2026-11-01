@@ -124,6 +124,9 @@ test('a run whose heartbeat went stale (cw killed, no .done) stops counting as w
   await clock.advance(500)
   expect(status.some(s => s?.includes('working'))).toBe(false)
   hbAt = NOW
+  // Idle (nothing live) lists the run dir only every IDLE_POLL_MS.
   await clock.advance(500)
+  expect(status.some(s => s?.includes('working'))).toBe(false)
+  await clock.advance(5000)
   expect(status.at(-1)).toMatch(/1 working/)
 })

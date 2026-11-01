@@ -13,6 +13,8 @@ const DAY = 86_400_000
 // cw touches <run>.hb every 30 s while its process lives: a staler one means cw was killed before .done.
 const STALE_MS = 90_000
 const DIED = 137
+// With no worker live the run dir (thousands of files) is listed this often, not every 400 ms.
+const IDLE_POLL_MS = 5000
 const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
 const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
 const tab = atom({ plugin: 'cw-crew', key: 'tab' } as const, 'notes' as Tab)
@@ -39,6 +41,7 @@ let status: string | undefined
 let opened = false
 let polling = false
 let lastKick = 0
+let idleUntil = 0
 // Surfaces with no Raster (desktop, editor, mobile) get the scene as an Svg, redrawn by poll() while shown.
 let svgAt = 0
 let svgKick = 0
@@ -67,6 +70,7 @@ async function poll($: EngineInterface) {
       metas = new Map(); runs = new Map(); seen = new Map()
     }
     const now = await $.clock.now()
+    if (now < idleUntil && !selKey && now - svgAt >= 5000) return
     const entries = await $.fs.list(dir).catch(() => [])
     const byName = new Map(entries.map(en => [en.name, en]))
 
@@ -130,6 +134,7 @@ async function poll($: EngineInterface) {
     const text = active ? `⚒ ${active} working${asking ? ` · ${asking} asking` : ''}`
       : asking ? `? ${asking} waiting for an answer` : undefined
     if (text !== status) { status = text; $.ui.status(text) }
+    idleUntil = active || asking ? 0 : now + IDLE_POLL_MS
 
     if (active && !opened) {
       opened = true
