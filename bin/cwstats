@@ -17,19 +17,22 @@ cutoff=$(( $(date +%s) - days * 86400 ))
 perl -MJSON::PP -e '
   use strict; use warnings;
   my $logdir = $ARGV[0]; my $cutoff = $ARGV[1];
-  opendir my $dh, $logdir or die "cwstats: cannot open $logdir: $!\n";
-  my %bases;
-  while (my $f = readdir $dh) {
-    next unless $f =~ /^(\d{8}-\d{6}-\w+-\d+)\.(meta|json|done|ask|events|verdict)$/;
-    $bases{$1}{$2} = 1;
+  # cw moves runs older than 2 days to <logdir>-archive: read both.
+  my (%bases, %dir);
+  for my $d ("$logdir-archive", $logdir) {
+    opendir my $dh, $d or do { next if $d ne $logdir; die "cwstats: cannot open $logdir: $!\n" };
+    while (my $f = readdir $dh) {
+      next unless $f =~ /^(\d{8}-\d{6}-\w+-\d+)\.(meta|json|done|ask|events|verdict)$/;
+      $bases{$1}{$2} = 1; $dir{$1} = $d;
+    }
+    closedir $dh;
   }
-  closedir $dh;
   my $j = JSON::PP->new->utf8->canonical;
 
   for my $b (sort keys %bases) {
     my %has = %{$bases{$b}};
     next unless $has{meta};
-    my $mf = "$logdir/$b.meta";
+    my $mf = "$dir{$b}/$b.meta";
     open my $fh, "<", $mf or next;
     my $raw = do { local $/; <$fh> }; close $fh;
     my $m = eval { $j->decode($raw) } or next;
@@ -51,7 +54,7 @@ perl -MJSON::PP -e '
 
     # .json result
     if ($has{json}) {
-      my $jf = "$logdir/$b.json";
+      my $jf = "$dir{$b}/$b.json";
       if (open my $jh, "<", $jf) {
         my $jr = do { local $/; <$jh> }; close $jh;
         if (length($jr) > 2) {
@@ -73,7 +76,7 @@ perl -MJSON::PP -e '
 
     # .done
     if ($has{done}) {
-      my $df = "$logdir/$b.done";
+      my $df = "$dir{$b}/$b.done";
       if (open my $dh2, "<", $df) { my $rc = <$dh2> // ""; close $dh2; $r{done_rc} = $rc + 0 if $rc =~ /^\d+/; }
     }
     $r{has_ask} = $has{ask} ? 1 : 0;
@@ -82,7 +85,7 @@ perl -MJSON::PP -e '
     $r{marked} = 0;
     $r{right}  = 0;
     if ($has{verdict}) {
-      my $vf = "$logdir/$b.verdict";
+      my $vf = "$dir{$b}/$b.verdict";
       if (open my $vh, "<", $vf) {
         my $vr = do { local $/; <$vh> }; close $vh;
         if (defined $vr && length($vr) > 2) {
@@ -97,7 +100,7 @@ perl -MJSON::PP -e '
 
     # .events: scan for accept_end, error, tool, last event t
     if ($has{events}) {
-      my $ef = "$logdir/$b.events";
+      my $ef = "$dir{$b}/$b.events";
       if (open my $eh, "<", $ef) {
         my ($last_t, $errs, $accept_ok, $accept_total) = (0, 0, 0, 0);
         my @abs_tools;

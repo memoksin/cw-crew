@@ -96,7 +96,7 @@ makes git push and commit fail. A destructive command in another syntax can stil
 | `CW_MAX_TURNS` | 80 | coder turn limit |
 | `CW_TIMEOUT` | 3600 coder / 1200 scout, reviewer | seconds |
 | `CW_REVIEW_MAX` | 60000 | characters of diff a reviewer gets inline; the rest it reads itself |
-| `CW_LOG_DIR` | `~/.claude/cw-runs` | run logs (the pane reads them too) |
+| `CW_LOG_DIR` | `~/.claude/cw-runs` | run logs (the pane reads them too); runs older than 2 days move to `$CW_LOG_DIR-archive` |
 | `CW_FLEET` | `$CW_LOG_DIR/fleet/<repo>` | fleet dir |
 | `CW_WT_ROOT` | `../<repo>-wt` | worktree root |
 | `CW_JEV` | 0 | `1` = Jev (OpenRouter) picks worker effort per task. **Sends the first 20k characters of each task to OpenRouter.** Off: role default (scout low, coder medium) |

@@ -12,10 +12,17 @@ const FILES: Record<string, string> = {
   'a.jsonl': '{"type":"assistant","message":{"content":[{"type":"text","text":"Running the tests now."}]}}\n',
 }
 
+// fs.stat over a test's files; a missing one is denied like a missing path.
+const statOf = (files: Record<string, string>, mtime: (name: string) => number = () => NOW - 1000) => async (_$: unknown, e: { path: string }) => {
+  const name = e.path.slice(e.path.lastIndexOf('/') + 1)
+  return (name in files ? { value: { kind: 'file', size: files[name]!.length, mtimeMs: mtime(name), isLink: false } } : { deny: `no ${name}` }) as never
+}
+
 for (const surface of ['terminal', 'desktop'] as const) test(`${surface}: the crew pane draws cards with a details button, opens the detail view and goes back`, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
   on('fs.list', async () => ({ value: Object.entries(FILES).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(FILES))
   on('fs.read', async (_$, e) => {
     if (e.path.includes('/frames/')) return { value: { base64: 'UE5H' } } as never
     const name = e.path.slice(DIR.length + 1)
@@ -54,6 +61,7 @@ test('windows: with only USERPROFILE set the pane reads runs from ~/.claude/cw-r
     listed.push(e.path)
     return { value: Object.entries(FILES).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) } as never
   })
+  on('fs.stat', statOf(FILES))
   on('fs.read', async (_$, e) => {
     if (e.path.includes('/frames/')) return { value: { base64: 'UE5H' } } as never
     const name = e.path.slice(e.path.lastIndexOf('/') + 1)
@@ -85,6 +93,7 @@ test('a request the lead closed (cwopen -x renames .ask) lowers the hand', async
     'a.events': `${FILES['a.events']}{"e":"result","ok":true,"sub":"success","sid":"sid-a","turns":2,"denied":1,"out":10,"t":1791799990000}\n`,
   }
   on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(files))
   on('fs.read', async (_$, e) => {
     const name = e.path.slice(DIR.length + 1)
     return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
@@ -110,6 +119,7 @@ test('a run whose heartbeat went stale (cw killed, no .done) stops counting as w
   const files: Record<string, string> = { ...FILES, 'a.hb': '' }
   let hbAt = NOW - 200_000
   on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: name === 'a.hb' ? hbAt : NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(files, name => (name === 'a.hb' ? hbAt : NOW - 1000)))
   on('fs.read', async (_$, e) => {
     const name = e.path.slice(DIR.length + 1)
     return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
@@ -124,9 +134,40 @@ test('a run whose heartbeat went stale (cw killed, no .done) stops counting as w
   await clock.advance(500)
   expect(status.some(s => s?.includes('working'))).toBe(false)
   hbAt = NOW
-  // Idle (nothing live) lists the run dir only every IDLE_POLL_MS.
   await clock.advance(500)
-  expect(status.some(s => s?.includes('working'))).toBe(false)
-  await clock.advance(5000)
   expect(status.at(-1)).toMatch(/1 working/)
+})
+
+test('after the first poll only live/ is listed, and a new worker shows up through its marker', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const files: Record<string, string> = { ...FILES }
+  let live: string[] = []
+  const listed: string[] = []
+  on('fs.list', async (_$, e) => {
+    listed.push(e.path)
+    const all = e.path === `${DIR}/live` ? live.map(name => [name, '']) : Object.entries(files)
+    return { value: all.map(([name, text]) => ({ name, kind: 'file', size: text!.length, mtimeMs: NOW - 1000 })) } as never
+  })
+  on('fs.stat', statOf(files))
+  on('fs.read', async (_$, e) => {
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  const status: (string | undefined)[] = []
+  on('ui.status', async (_$, e) => { status.push((e as { text?: string }).text); return { value: undefined } as never })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.toast', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  expect(status.at(-1)).toMatch(/1 working/)
+  files['b.meta'] = meta('beta')
+  files['b.events'] = '{"e":"init","sid":"sid-b","t":1791799980000}\n'
+  live = ['b']
+  await clock.advance(500)
+  expect(status.at(-1)).toMatch(/2 working/)
+  expect(listed[0]).toBe(DIR)
+  expect(listed.slice(1).every(p => p === `${DIR}/live`)).toBe(true)
 })

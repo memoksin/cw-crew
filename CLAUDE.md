@@ -7,7 +7,7 @@ Claude Code plugin: `orchestrate` skill + `cw` worker CLI + crew pane (hooks mod
 - `skills/orchestrate/SKILL.md`: lead's playbook. Commands named bare (`cw`), plugin `bin/` is on PATH.
 - `bin/`: bash, macOS + Linux + Windows (Git Bash). Needs `claude`, `jq`, `perl`, `git`. No `rg`/`fd` in scripts (scouts may use them).
 - `bin/cwstats`: local report over the run logs (`tests/cwstats.sh`); one `jq -n` pass, `--export` stays numbers-only.
-- `hooks/register.tsx`: pane, `/crew`, polling of `$CW_LOG_DIR` (default `~/.claude/cw-runs`).
+- `hooks/register.tsx`: pane, `/crew`, polling of `$CW_LOG_DIR` (default `~/.claude/cw-runs`): full list once per session, then only `live/` (cw marker per running worker) + `fs.stat`.
 - `hooks/scene.ts`: card layout + text. `hooks/creatures.ts`: sprites.
 - `frames/`: generated PNGs. Rebuild: `tools/gen_frames.sh` (bun + Pillow). Never edit by hand.
 - `types/index.d.ts`: `$.state` contract. Every state key the module uses goes here.

@@ -13,8 +13,8 @@ const DAY = 86_400_000
 // cw touches <run>.hb every 30 s while its process lives: a staler one means cw was killed before .done.
 const STALE_MS = 90_000
 const DIED = 137
-// With no worker live the run dir (thousands of files) is listed this often, not every 400 ms.
-const IDLE_POLL_MS = 5000
+// The files of a run poll() looks at; the rest are read by name when needed.
+const WATCHED = ['meta', 'events', 'hb', 'done', 'ask', 'jsonl']
 const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
 const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
 const tab = atom({ plugin: 'cw-crew', key: 'tab' } as const, 'notes' as Tab)
@@ -41,7 +41,8 @@ let status: string | undefined
 let opened = false
 let polling = false
 let lastKick = 0
-let idleUntil = 0
+// The run dir keeps every past run: list it once per session, then only live/ (cw's marker per running worker).
+let scanned = false
 // Surfaces with no Raster (desktop, editor, mobile) get the scene as an Svg, redrawn by poll() while shown.
 let svgAt = 0
 let svgKick = 0
@@ -67,11 +68,11 @@ async function poll($: EngineInterface) {
     const sid = await $.session.id()
     if (sid !== session) {
       session = sid
-      metas = new Map(); runs = new Map(); seen = new Map()
+      metas = new Map(); runs = new Map(); seen = new Map(); scanned = false
     }
     const now = await $.clock.now()
-    if (now < idleUntil && !selKey && now - svgAt >= 5000) return
-    const entries = await $.fs.list(dir).catch(() => [])
+    const entries = scanned ? await watched($) : await $.fs.list(dir).catch(() => [])
+    scanned = true
     const byName = new Map(entries.map(en => [en.name, en]))
 
     for (const en of entries) {
@@ -134,7 +135,6 @@ async function poll($: EngineInterface) {
     const text = active ? `⚒ ${active} working${asking ? ` · ${asking} asking` : ''}`
       : asking ? `? ${asking} waiting for an answer` : undefined
     if (text !== status) { status = text; $.ui.status(text) }
-    idleUntil = active || asking ? 0 : now + IDLE_POLL_MS
 
     if (active && !opened) {
       opened = true
@@ -153,6 +153,20 @@ async function poll($: EngineInterface) {
   } finally {
     polling = false
   }
+}
+
+// Runs that can still change: cw's live markers, unfinished or asking runs, and the open worker's run.
+async function watched($: EngineInterface) {
+  const ids = new Set((await $.fs.list(`${dir}/live`).catch(() => [])).map(en => en.name))
+  for (const r of runs.values()) if (!r.final || r.question !== undefined) ids.add(r.id)
+  const sel = selKey ? workers.find(w => w.key === selKey)?.runIds.at(-1) : undefined
+  if (sel) ids.add(sel)
+  const names = [...ids].flatMap(id => WATCHED.map(ext => `${id}.${ext}`))
+  const stats = await Promise.all(names.map(name => $.fs.stat(`${dir}/${name}`).catch(() => undefined)))
+  return names.flatMap((name, i) => {
+    const st = stats[i]
+    return st?.kind === 'file' ? [{ name, kind: 'file' as const, size: st.size, mtimeMs: st.mtimeMs }] : []
+  })
 }
 
 // The open worker's newest run: its stream (.jsonl) holds the notes, its result (.json) the report.

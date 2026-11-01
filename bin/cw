@@ -43,10 +43,11 @@ task=""; [ -t 0 ] || task=$(cat)
 [ -n "$task" ] || { echo "cw: empty task" >&2; exit 2; }
 case $effort in auto|low|medium|high|xhigh|max) ;; *) usage ;; esac
 logdir=${CW_LOG_DIR:-$HOME/.claude/cw-runs}; mkdir -p "$logdir/dirs"
-# The crew pane lists $logdir on every poll: once a day, move run files older than 14 days aside.
+# The crew pane lists $logdir on every poll: once a day, move run files older than 2 days aside.
 if [ -z "$(find "$logdir/dirs/.archived" -mtime -1 2>/dev/null)" ]; then
   touch "$logdir/dirs/.archived"; mkdir -p "$logdir-archive"
-  find "$logdir" -maxdepth 1 -type f -mtime +14 -exec mv {} "$logdir-archive/" \; 2>/dev/null
+  find "$logdir" -maxdepth 1 -type f -mtime +1 -exec mv {} "$logdir-archive/" \; 2>/dev/null
+  find "$logdir/live" -type f -mtime +1 -delete 2>/dev/null   # markers of workers killed before .done
 fi
 if [ -n "$wtname" ] && [ "$role" = reviewer ]; then
   dir=$(cd "$dir" && "$here/cwwt" path "$wtname") || { echo "cw: no worktree $wtname to review" >&2; exit 2; }
@@ -287,7 +288,9 @@ jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESS
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
   + (if $isagy == 1 then {agy: {home: $agyhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null), homes: $agyhomes}} else {} end)' \
   > "$log.meta"
-# Heartbeat for the pane: stops when cw dies (killed, no .done) or finishes. fds closed so $(cw ...) callers never wait on it.
+# The pane polls live/ (one empty marker per running worker), not the whole run dir.
+live="$logdir/live/${log##*/}"; mkdir -p "$logdir/live"; : > "$live"
+# Heartbeat for the pane: stops when cw dies (killed, no .done: the marker stays) or finishes. fds closed so $(cw ...) callers never wait on it.
 ( while kill -0 $$ 2>/dev/null && [ ! -e "$log.done" ]; do touch "$log.hb"; sleep 30; done ) </dev/null >/dev/null 2>&1 &
 # A tool command that outlived its own timeout (e.g. blocked on a full pipe) keeps `claude -p` from
 # exiting after its result, so cw never wrote .json. Once the result is in, give claude CW_EXIT_GRACE
@@ -377,7 +380,7 @@ if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
 fi
 # agy ran out of quota mid-run and changed nothing: run the same task again, agy tiers off (Claude fallback).
 if [ -n "$agy" ] && [ -n "$tree0" ] && [ "$tree1" = "$tree0" ] && grep -q RESOURCE_EXHAUSTED "$log.err" 2>/dev/null; then
-  echo "$rc" > "$log.done"
+  echo "$rc" > "$log.done"; rm -f "$live"
   echo "cw: agy quota ran out mid-run (no file changes); rerunning on Claude" >&2
   CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
 fi
@@ -393,6 +396,7 @@ if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.sub
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
   again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept")
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
+  rm -f "$live"
   CW_AUTO_CONTINUE=$((left - 1)) CW_CONT=1 exec "$0" coder "${again[@]}" <<< "You hit the turn limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
 fi
 # A worker that ends on QUESTION: waits to be resumed (-r sid) with the answer: rc 3, question in .ask.
@@ -405,7 +409,7 @@ case $(printf '%s' "$perm" | tr '[:upper:]' '[:lower:]') in none|none[.,:\ ]*|n/
 [ -n "$q" ] && printf '%s\n' "$q" > "$log.ask"
 secs=$(( $(date +%s) - start ))
 if ! jq -e . "$log.json" >/dev/null 2>&1; then
-  echo "$rc" > "$log.done"
+  echo "$rc" > "$log.done"; rm -f "$live"
   echo "cw: worker produced no JSON (rc=$rc, 142 = timeout)"; tail -5 "$log.err"
   echo "[cw $role $model rc=$rc ${secs}s log=$log.err]" >&2; exit $(( rc ? rc : 1 ))
 fi
@@ -427,7 +431,7 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
   fi
   printf '{"e":"accept_end","ok":%s,"rc":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
 fi
-echo "$rc" > "$log.done"
+echo "$rc" > "$log.done"; rm -f "$live"
 [ -n "$wtname" ] && echo "[cw WT $wtname dir=$dir  merge: cwwt diff|apply|rm $wtname]" >&2
 jq -r --arg r "$role" --arg e "$effort" --arg es "$effort_src" --arg rc "$rc" --arg s "$secs" --arg l "$log.json" '
   "[cw \($r) \(.modelUsage|keys|join(",")) effort=\($e)(\($es)) rc=\($rc) \(.subtype) sid=\(.session_id) turns=\(.num_turns)"

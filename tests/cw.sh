@@ -28,7 +28,7 @@ printf 'Spec: keep two lines.\n' > "$t/spec.md"
 mkdir -p "$CW_LOG_DIR"; touch -t 202001010000 "$CW_LOG_DIR/old.meta"; touch "$CW_LOG_DIR/new.meta"
 # Clean tree: nothing to review, claude never starts.
 "$here/bin/cw" reviewer <<< "x" >/dev/null 2>"$t/err"; rc=$?
-check "run files older than 14 days move to the archive" '[ -f "$CW_LOG_DIR-archive/old.meta" ] && [ ! -e "$CW_LOG_DIR/old.meta" ] && [ -f "$CW_LOG_DIR/new.meta" ]'
+check "run files older than 2 days move to the archive" '[ -f "$CW_LOG_DIR-archive/old.meta" ] && [ ! -e "$CW_LOG_DIR/old.meta" ] && [ -f "$CW_LOG_DIR/new.meta" ]'
 rm -f "$CW_LOG_DIR/new.meta"
 check "clean tree exits 2" '[ $rc = 2 ] && grep -q "nothing to review" "$t/err" && [ ! -e "$t/args" ]'
 "$here/bin/cw" reviewer -w <<< "x" >/dev/null 2>&1
@@ -45,6 +45,7 @@ check "spec and task inlined" 'grep -q "Spec: keep two lines." "$t/prompt" && gr
 check "default model Sonnet, effort low" 'arg claude-sonnet-5-5 && arg low'
 check "read-only tools, dontAsk, no web" 'arg Read,Bash && arg dontAsk && ! grep -qE "Edit|Write|WebFetch|WebSearch" "$t/args"'
 check "short turn limit" 'arg 20'
+check "live marker gone once the run is done" '[ -d "$CW_LOG_DIR/live" ] && [ -z "$(ls -A "$CW_LOG_DIR/live")" ]'
 check "meta file records role reviewer" 'jq -e "select(.role==\"reviewer\")" "$CW_LOG_DIR"/*-reviewer-*.meta >/dev/null'
 check "work tree untouched" '[ "$(cat a.txt)" = "$(printf "one\nTWO")" ] && [ -f b.txt ]'
 
