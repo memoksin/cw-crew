@@ -7,7 +7,7 @@ t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 mkdir -p "$t/bin"
 cat > "$t/bin/claude" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"
+printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"; printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-}" > "$FAKE/ep"
 echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
 so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
 echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"DONE review: clean","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
@@ -132,6 +132,11 @@ chmod +x "$t/bin/agy"
 CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" scout -M flash -S "$t/s.json" <<< "x" >/dev/null 2>"$t/err"
 check "-S: agy tier falls back to the Claude model" 'arg claude-haiku-5-5 && arg --json-schema && grep -q "^cw: -S needs a Claude tier, using claude-haiku-5-5" "$t/err"'
 rm -f "$t/bin/agy"
+
+CW_ENTRYPOINT=cw-crew "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "CW_ENTRYPOINT sets the client label" '[ "$(cat "$t/ep")" = cw-crew ]'
+CLAUDE_CODE_ENTRYPOINT=cli "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "no CW_ENTRYPOINT: inherited label is scrubbed" '[ ! -s "$t/ep" ]'
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

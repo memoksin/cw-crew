@@ -372,7 +372,9 @@ if [ -n "$agy" ]; then
        modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
     "$log.jsonl" | tail -1 > "$log.json"
 else
-printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" CLAUDE_CODE_SHELL="$(command -v bash)" \
+# Opt-in client label: headless claude -p otherwise reports sdk-cli, which users measure as a faster 5-hour drain (anthropics/claude-code#97074).
+ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
+printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" ${ep[@]+"${ep[@]}"} CLAUDE_CODE_SHELL="$(command -v bash)" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
   | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
