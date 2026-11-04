@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # cw — run one headless Claude worker. Task on stdin, report on stdout, one meta line on stderr.
-#   cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... < task.md
+#   cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-S schema.json] < task.md
+#   -S file: JSON Schema for the report (scout, coder; Claude tiers only). Meta line: schema=pass|FAIL; on pass the
+#     compact structured_output JSON is the last stdout line. FAIL makes an rc-0 run rc 1. Not persisted: pass it again on -r.
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
@@ -27,15 +29,20 @@ tlimit() {
   perl -e 'alarm shift; exec @ARGV' "$t" "$@"
 }
 
-usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] < task" >&2; exit 2; }
+usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-S schema.json] < task" >&2; exit 2; }
 argv=("$@")   # for a rerun on Claude when agy runs out of quota mid-run
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
-base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""
-while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:" o; do
-  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; *) usage ;; esac
+base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""
+while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:S:" o; do
+  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; S) schema=$OPTARG ;; *) usage ;; esac
 done
 [ "$role" = reviewer ] && [ -n "$web" ] && { echo "cw: reviewer has no web" >&2; exit 2; }
+if [ -n "$schema" ]; then
+  [ "$role" = reviewer ] && { echo "cw: -S is for scout and coder" >&2; exit 2; }
+  [ -f "$schema" ] || { echo "cw: no such schema file: $schema" >&2; exit 2; }
+  schemac=$(jq -c . "$schema" 2>/dev/null) || { echo "cw: schema is not valid JSON: $schema" >&2; exit 2; }
+fi
 [ -t 0 ] && [ "$role" != reviewer ] && { echo "cw: task must come on stdin" >&2; exit 2; }
 [ -n "$tmo" ] || { [ "$role" = coder ] && tmo=${CW_TIMEOUT:-3600} || tmo=${CW_TIMEOUT:-1200}; }   # coders get 60 min, scouts and reviewers 20
 task=""; [ -t 0 ] || task=$(cat)
@@ -126,6 +133,7 @@ else
   args=(--permission-mode auto --max-turns "$maxt" --allowedTools "Bash($here/cwkill *)" --disallowedTools "${hard[@]}")
 fi
 [ -n "$resume" ] && args+=(--resume "$resume")
+[ -n "$schema" ] && args+=(--json-schema "${schemac:-}")
 if [ ${#granted[@]} -gt 0 ]; then
   args+=(--allowedTools "${granted[@]}")
   # An ask rule beats an allow rule, so drop the ask rules a granted call falls under.
@@ -157,6 +165,7 @@ if [ -n "$agy" ]; then
   if [ "${CW_AGY:-0}" != 1 ]; then why="agy tiers are off (CW_AGY=1 turns them on)"
   elif [ -n "$web" ]; then why="agy tiers have no web tools"
   elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
+  elif [ -n "$schema" ]; then why="-S needs a Claude tier"
   elif ! command -v agy >/dev/null; then why="agy not on PATH"
   elif [ -n "$resume" ] && [ -f "$logdir/dirs/$resume.agy" ]; then ah=$(cat "$logdir/dirs/$resume.agy")
   else
@@ -394,7 +403,7 @@ if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.sub
    && jq -se '(map(select(.e=="error")) | length) * 2 < (map(select(.e=="ok" or .e=="error")) | length)' "$log.events" >/dev/null 2>&1; then
   # no .done for this segment: the crew pane would toast it as failed; the resumed run (same pid) carries on
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
-  again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept")
+  again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept"); [ -n "$schema" ] && again+=(-S "$schema")
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
   rm -f "$live"
   CW_AUTO_CONTINUE=$((left - 1)) CW_CONT=1 exec "$0" coder "${again[@]}" <<< "You hit the turn limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
@@ -414,7 +423,11 @@ if ! jq -e . "$log.json" >/dev/null 2>&1; then
   echo "[cw $role $model rc=$rc ${secs}s log=$log.err]" >&2; exit $(( rc ? rc : 1 ))
 fi
 jq -r '.result // "(no result: \(.subtype))"' "$log.json"
-acc=""
+acc=""; sch=""
+if [ -n "$schema" ]; then
+  if jq -e '.structured_output | type == "object"' "$log.json" >/dev/null 2>&1; then sch=" schema=pass"
+  else sch=" schema=FAIL"; [ "$rc" = 0 ] && rc=1; fi
+fi
 if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$q" ]; then
   # .done waits for the acceptance run, so the crew pane shows the worker as "testing" meanwhile
   printf '{"e":"accept","t":%s}\n' "$(( $(date +%s) * 1000 ))" >> "$log.events"
@@ -431,12 +444,13 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
   fi
   printf '{"e":"accept_end","ok":%s,"rc":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
 fi
+[ "$sch" = " schema=pass" ] && jq -c .structured_output "$log.json"
 echo "$rc" > "$log.done"; rm -f "$live"
 [ -n "$wtname" ] && echo "[cw WT $wtname dir=$dir  merge: cwwt diff|apply|rm $wtname]" >&2
 jq -r --arg r "$role" --arg e "$effort" --arg es "$effort_src" --arg rc "$rc" --arg s "$secs" --arg l "$log.json" '
   "[cw \($r) \(.modelUsage|keys|join(",")) effort=\($e)(\($es)) rc=\($rc) \(.subtype) sid=\(.session_id) turns=\(.num_turns)"
   + " new_in=\(.usage.input_tokens + .usage.cache_creation_input_tokens) cache_r=\(.usage.cache_read_input_tokens) out=\(.usage.output_tokens)"
-  + " denied=\(.permission_denials|length) \($s)s\($a) log=\($l)]"' --arg a "$acc" "$log.json" >&2
+  + " denied=\(.permission_denials|length) \($s)s\($a)\($sc) log=\($l)]"' --arg a "$acc" --arg sc "$sch" "$log.json" >&2
 jq -e '.is_error | not' "$log.json" >/dev/null || exit $(( rc ? rc : 1 ))
 if [ -n "$perm" ]; then
   echo "[cw PERM sid=$(jq -r .session_id "$log.json") req=$perm]" >&2

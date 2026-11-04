@@ -9,7 +9,8 @@ cat > "$t/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"
 echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
-echo '{"type":"result","subtype":"success","is_error":false,"result":"DONE review: clean","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
+so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
+echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"DONE review: clean","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
@@ -108,6 +109,28 @@ A
 chmod +x "$t/bin/agy"; rm -f "$t/args"
 CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "agy quota out mid-run: rerun on Claude Sonnet" 'arg claude-sonnet-5-5 && grep -q "rerunning on Claude" "$t/err" && [ $rc = 0 ]'
+rm -f "$t/bin/agy"
+
+# -S schema: forwarded compact, bad file exits 2 before the model, pass/FAIL in the meta line, agy falls back.
+printf '{\n "type": "object"\n}\n' > "$t/s.json"; printf '{bad' > "$t/bad.json"; rm -f "$t/args"
+out=$(FAKE_SO=1 "$here/bin/cw" scout -S "$t/s.json" <<< "x" 2>"$t/err"); rc=$?
+check "-S: schema forwarded compact via --json-schema" 'grep -qx -- --json-schema "$t/args" && arg "{\"type\":\"object\"}"'
+check "-S: schema=pass, structured_output is the last stdout line" '[ $rc = 0 ] && grep -q " schema=pass " "$t/err" && [ "$(tail -1 <<< "$out")" = "{\"ok\":true,\"n\":1}" ]'
+out=$("$here/bin/cw" coder -S "$t/s.json" <<< "x" 2>"$t/err"); rc=$?
+check "-S: no structured_output gives schema=FAIL and rc 1" '[ $rc = 1 ] && grep -q " schema=FAIL " "$t/err" && [ "$out" = "DONE review: clean" ]'
+rm -f "$t/args"
+"$here/bin/cw" scout -S "$t/bad.json" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "-S: invalid JSON exits 2, no model call" '[ $rc = 2 ] && grep -q "not valid JSON" "$t/err" && [ ! -e "$t/args" ]'
+"$here/bin/cw" scout -S "$t/none.json" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "-S: missing file exits 2, no model call" '[ $rc = 2 ] && grep -q "no such schema file" "$t/err" && [ ! -e "$t/args" ]'
+cat > "$t/bin/agy" <<'A'
+#!/usr/bin/env bash
+case "$*" in *"/usage"*) printf 'Gemini Models\tFive Hour Limit Remaining\t90%%\tx\nGemini Models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
+exit 1
+A
+chmod +x "$t/bin/agy"
+CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" scout -M flash -S "$t/s.json" <<< "x" >/dev/null 2>"$t/err"
+check "-S: agy tier falls back to the Claude model" 'arg claude-haiku-5-5 && arg --json-schema && grep -q "^cw: -S needs a Claude tier, using claude-haiku-5-5" "$t/err"'
 rm -f "$t/bin/agy"
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1

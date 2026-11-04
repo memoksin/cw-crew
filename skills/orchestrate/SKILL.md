@@ -63,12 +63,13 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 The plugin puts `cw`, `cwgo`, `cwwait`, `cwls`, `cwopen`, `cwwt` and `cwkill` on the Bash PATH. If `command -v cw` finds nothing, call them as `${CLAUDE_SKILL_DIR}/../../bin/<name>`. Needs `claude`, `jq`, `perl`, `git` (install notes: README).
 
 ```sh
-cw scout|coder|reviewer [-M tier] [-C dir] [-W name] [-B ref] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] < task.md
+cw scout|coder|reviewer [-M tier] [-C dir] [-W name] [-B ref] [-r sid] [-t sec] [-e ...] [-w] [-f file]... [-T 'test cmd'] [-S schema.json] < task.md
 ```
 
 - Report → stdout. Meta → stderr: `[cw role model rc subtype sid turns new_in cache_r out denied secs accept=… log=…]`.
 - `-f file` (repeatable) inlines the file into the prompt. Use it whenever you already know which files matter.
 - `-T 'cmd'`: cw runs the acceptance command itself in the worker's dir after a clean finish. The meta line shows `accept=pass`, `accept=FAIL(rc=N)` or `accept=FAIL(output)` (exit 0 but a `FAIL`/`SCRIPT ERROR` line; Godot exits 0 on a failed test; `CW_ACCEPT_FAIL_RE` overrides the pattern, empty turns it off), and on failure the report ends with the last 20 lines. Always pass it when the spec has acceptance commands, so you do not rerun them by hand just to learn pass/fail.
+- `-S schema.json` (scout, coder): the report is checked against a JSON Schema (`claude --json-schema`). Meta line shows `schema=pass` and the compact `structured_output` JSON is the last stdout line; `schema=FAIL` turns an rc-0 run into rc 1. A missing or invalid file exits 2 before any model call. Claude tiers only (agy falls back). Not persisted: pass it again on `-r`.
 - Turn limit (`CW_MAX_TURNS`, coder default 80; use 150 for big tasks): cw resumes the same session once with a "continue" message (`CW_AUTO_CONTINUE`, default 1), but only if that run changed files and under half of its tool calls failed. A worker that loops stops with `error_max_turns`: read why before resuming it, never resume blindly.
 - `-D dir` (repeatable): extra dir the worker may read, e.g. screenshots under `/tmp` for a scout review. Without it, reads outside the work dir are denied.
 - Fix-up → `-r <sid>` (scout or coder). The worker keeps its context and runs in the session's own dir. It is not cheap: see "Resume cost".
