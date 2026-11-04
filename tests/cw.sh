@@ -10,7 +10,7 @@ cat > "$t/bin/claude" <<'EOF'
 printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"; printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-}" > "$FAKE/ep"
 echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
 so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
-echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"DONE review: clean","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
+echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
@@ -133,6 +133,12 @@ CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" scout -M flash -S "$t/s.json" <<<
 check "-S: agy tier falls back to the Claude model" 'arg claude-haiku-5-5 && arg --json-schema && grep -q "^cw: -S needs a Claude tier, using claude-haiku-5-5" "$t/err"'
 rm -f "$t/bin/agy"
 
+: > "$t/empty.json"
+"$here/bin/cw" scout -S "$t/empty.json" <<< "x" >/dev/null 2>&1; rc=$?
+check "-S: empty file exits 2" '[ $rc = 2 ]'
+echo '{"type":"object"}' > "$t/q.json"
+FAKE_RESULT="QUESTION: which one?" "$here/bin/cw" scout -S "$t/q.json" <<< "x" >/dev/null 2>&1; rc=$?
+check "-S: an open question keeps rc 3 and a clean .done" '[ $rc = 3 ] && [ "$(cat "$(ls -t "$t"/logs/*.done | head -1)")" = 0 ]'
 CW_ENTRYPOINT=cw-crew "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
 check "CW_ENTRYPOINT sets the client label" '[ "$(cat "$t/ep")" = cw-crew ]'
 CLAUDE_CODE_ENTRYPOINT=cli "$here/bin/cw" scout <<< "x" >/dev/null 2>&1

@@ -41,7 +41,7 @@ done
 if [ -n "$schema" ]; then
   [ "$role" = reviewer ] && { echo "cw: -S is for scout and coder" >&2; exit 2; }
   [ -f "$schema" ] || { echo "cw: no such schema file: $schema" >&2; exit 2; }
-  schemac=$(jq -c . "$schema" 2>/dev/null) || { echo "cw: schema is not valid JSON: $schema" >&2; exit 2; }
+  schemac=$(jq -c . "$schema" 2>/dev/null) && [ -n "$schemac" ] || { echo "cw: schema is not valid JSON: $schema" >&2; exit 2; }
 fi
 [ -t 0 ] && [ "$role" != reviewer ] && { echo "cw: task must come on stdin" >&2; exit 2; }
 [ -n "$tmo" ] || { [ "$role" = coder ] && tmo=${CW_TIMEOUT:-3600} || tmo=${CW_TIMEOUT:-1200}; }   # coders get 60 min, scouts and reviewers 20
@@ -428,7 +428,7 @@ jq -r '.result // "(no result: \(.subtype))"' "$log.json"
 acc=""; sch=""
 if [ -n "$schema" ]; then
   if jq -e '.structured_output | type == "object"' "$log.json" >/dev/null 2>&1; then sch=" schema=pass"
-  else sch=" schema=FAIL"; [ "$rc" = 0 ] && rc=1; fi
+  else sch=" schema=FAIL"; [ "$rc" = 0 ] && [ -z "$q$perm" ] && rc=1; fi   # an open question stays an ask
 fi
 if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$q" ]; then
   # .done waits for the acceptance run, so the crew pane shows the worker as "testing" meanwhile
