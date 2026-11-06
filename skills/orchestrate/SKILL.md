@@ -17,6 +17,23 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 
 Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on its own model unless `-M` names a tier (`-M flash`: see Reviewer).
 
+## Codex tiers (`CW_CODEX=1`): spend the ChatGPT plan first
+
+Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, coders and reviewers to `sol`, and these win over agy tiers. Pass `-M haiku|sonnet|opus` to stay on Claude.
+
+| `-M` | Model | Window | Use | Fallback |
+|---|---|---|---|---|
+| `luna` | GPT-6 Luna | 258k | scouts, web research, small exact edits | Haiku |
+| `sol` | GPT-6.1 Sol | 475k | coders, reviewers | Sonnet |
+| `astra` | GPT-6 Astra | 258k | rare; about 5x Sol. Only for a task Sol failed twice | Opus for coders |
+
+- Limits: `cwcodex` prints percent used (5h, week) with no model call. A run falls back to Claude at `CW_CODEX_MAX` (default 90).
+- Limit or full context mid-run with no file changes: cw reruns on Claude. A coder with file changes stops with `usage_limit` or `context_limit`: give that tree to a fresh Sonnet worker. Check every `-T` result yourself.
+- Needs more than the window (huge logs, a whole-repo read): use a Claude tier (1M).
+- Sandbox: coders write only in the work dir. Network, `.git` and other processes are blocked, and a blocked call cannot be approved, so a coder that needs the network or `-a` goes to `sonnet`. `rm -rf` inside the work dir is not blocked: use `-W` on an important repo.
+- Reads are open disk-wide except `CW_CODEX_DENY` and `CW_CODEX_DENY_GLOBS`. Tasks and the files workers read go to OpenAI.
+- No turn limit on Codex: only `-t` stops a loop. No image reading: visual review stays on Claude.
+
 ## Tiers (`-M`): spend Google quota first, Claude last
 
 Pick the lowest tier likely to get it right on the first try. agy tiers run on the Antigravity CLI (Google AI plan); they do not touch Claude limits.

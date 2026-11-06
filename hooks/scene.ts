@@ -380,7 +380,7 @@ export function gauges(w: Worker, now: number): Gauge[] {
   const q = w.agy
   const quota: Gauge[] = !q ? [] : (() => {
     const left = Math.min(q.five ?? 100, q.week ?? 100)
-    const tag = /^gemini/i.test(q.bucket) ? 'gem' : 'cl'
+    const tag = /^gemini/i.test(q.bucket) ? 'gem' : /^codex/i.test(q.bucket) ? 'gpt' : 'cl'
     const win = [q.five !== null && `5h ${q.five}%`, q.week !== null && `wk ${q.week}%`].filter(Boolean).join(' · ')
     return [{ name: 'quota', short: `${tag}`, f: 1 - left / 100, value: `${tag} ${left}%`, note: `${q.home}${win ? `: ${win}` : ''}` }]
   })()

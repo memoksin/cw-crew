@@ -8,7 +8,8 @@
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
 #   -W name: run in a git worktree outside the repo (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
-#   -M tier: flash (Gemini on the Antigravity CLI, Google AI quota) or haiku|sonnet|opus (Claude). See the tier block.
+#   -M tier: flash (Gemini on the Antigravity CLI, Google AI quota), luna|sol|astra (Codex, ChatGPT plan quota) or
+#     haiku|sonnet|opus (Claude). See the tier block.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
@@ -149,14 +150,49 @@ fi
 # reviewer keeps CW_REVIEWER_MODEL unless -M names a tier (flash: Gemini, read-only tools).
 # An agy tier falls back to the role's Claude model when agy tiers are off, the run needs -w or -a, agy is missing,
 # or no home in CW_AGY_HOME has quota (5h and weekly) at or above CW_AGY_MIN percent.
+# luna, sol, astra run on Codex (ChatGPT plan quota) and need CW_CODEX=1, which also makes them the role defaults: scout
+# luna, coder and reviewer sol. They fall back to Claude (haiku/sonnet, astra: opus) when Codex is off or missing, the run
+# needs -a, or either limit window is at CW_CODEX_MAX percent used. A Claude session keeps resuming on Claude.
+if [ -z "$tier" ] && [ "${CW_CODEX:-0}" = 1 ] && [ ${#granted[@]} -eq 0 ] && { [ -z "$resume" ] || [ -f "$logdir/dirs/$resume.codex" ]; }; then
+  [ "$role" = scout ] && tier=luna || tier=sol
+fi
 [ -n "$tier" ] || [ "$role" = reviewer ] || { if [ "$role" = coder ]; then tier=sonnet; elif [ -n "$web" ] || [ "${CW_AGY:-0}" != 1 ]; then tier=haiku; else tier=flash; fi; }
-agy=""
+agy=""; cdx=""
 case $tier in
   "") ;;
   flash) agy=gemini-3.8-flash-high ;;   # agy's Claude models are not offered: their quota bucket is tiny
+  luna) cdx=${CW_CODEX_LUNA:-gpt-6-luna} ;; sol) cdx=${CW_CODEX_SOL:-gpt-6.1-sol} ;; astra) cdx=${CW_CODEX_ASTRA:-gpt-6-astra} ;;
   haiku) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; sonnet) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; opus) model=claude-opus-5-5 ;;
   *) usage ;;
 esac
+if [ -n "$cdx" ]; then
+  why=""; mark=${resume:+$logdir/dirs/$resume.codex}
+  if [ "${CW_CODEX:-0}" != 1 ]; then why="codex tiers are off (CW_CODEX=1 turns them on)"
+  elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
+  elif ! command -v codex >/dev/null; then why="codex not on PATH"
+  elif [ -n "$resume" ]; then
+    if [ -f "$mark" ]; then cdx=$(cat "$mark"); else why="session $resume is not a Codex session"; fi
+  else
+    # A fleet starts workers together: one reading serves them all for CW_CODEX_TTL seconds.
+    cache=$logdir/dirs/.codex-limits
+    if [ -z "$(find "$cache" -mtime -"${CW_CODEX_TTL:-60}"s 2>/dev/null)" ] || [ ! -s "$cache" ]; then
+      "$here/cwcodex" > "$cache.$$" 2>/dev/null && mv "$cache.$$" "$cache" || rm -f "$cache.$$" "$cache"
+    fi
+    used=$(jq -r '[.five, .week] | max' "$cache" 2>/dev/null)
+    cx5=$(jq -r '100 - .five' "$cache" 2>/dev/null); cxw=$(jq -r '100 - .week' "$cache" 2>/dev/null)
+    if [ -z "$used" ]; then why="no Codex limit reading (signed in? codex login)"
+    elif [ "${used%.*}" -ge "${CW_CODEX_MAX:-90}" ]; then why="Codex limit at $used% used"; fi
+  fi
+  if [ -n "$why" ]; then
+    [ -n "$resume" ] && [ -f "$mark" ] && { echo "cw: $why; a Codex session cannot resume on Claude: rerun it fresh" >&2; exit 2; }
+    case $role in scout) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; reviewer) model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5} ;; *) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; esac
+    [ "$tier" = astra ] && [ "$role" = coder ] && model=claude-opus-5-5
+    echo "cw: $why, using $model" >&2; cdx=""
+  else
+    model=codex/$cdx; bucket=Codex
+    sp="$sp You run in an OS sandbox: writes outside the work dir, the network and .git are blocked, and a blocked call cannot be approved. Use your shell tool and apply_patch. Never spawn sub-agents and never wait for the user."
+  fi
+fi
 if [ -n "$agy" ]; then
   # agy keeps settings and login under $HOME: each home in CW_AGY_HOME is a HOME of symlinks to the real one (see
   # cwagy) with cw's own settings.json (deny rules) and agents/. Tool commands see this HOME too.
@@ -290,10 +326,10 @@ branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
-  --arg agyhome "${ah:+${ah##*/}}" --arg bucket "${bucket:-}" --argjson agyhomes "${agyhomes:-[]}" \
-  --arg a5 "$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Five/ { print $3 + 0; exit }' <<< "${usage:-}")" \
-  --arg aw "$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Weekly/ { print $3 + 0; exit }' <<< "${usage:-}")" \
-  --argjson isagy "$([ -n "$agy" ] && echo 1 || echo 0)" \
+  --arg agyhome "${ah:+${ah##*/}}${cdx:+codex}" --arg bucket "${bucket:-}" --argjson agyhomes "${agyhomes:-[]}" \
+  --arg a5 "${cx5:-}$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Five/ { print $3 + 0; exit }' <<< "${usage:-}")" \
+  --arg aw "${cxw:-}$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Weekly/ { print $3 + 0; exit }' <<< "${usage:-}")" \
+  --argjson isagy "$([ -n "$agy$cdx" ] && echo 1 || echo 0)" \
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
   + (if $isagy == 1 then {agy: {home: $agyhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null), homes: $agyhomes}} else {} end)' \
   > "$log.meta"
@@ -371,6 +407,64 @@ if [ -n "$agy" ]; then
          cache_read_input_tokens:(.usage.cache_read_tokens // 0), output_tokens:(.usage.output_tokens // 0)},
        modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
     "$log.jsonl" | tail -1 > "$log.json"
+elif [ -n "$cdx" ]; then
+  # The lean start: 3.6k input tokens against 27k for a plain `codex exec`. agents.enabled is the switch that removes
+  # the multi-agent tools and text; --disable multi_agent does not. Ignoring the user config also drops MCP and plugins.
+  printf '%s\n' "$sp" > "$log.sp"
+  # Reads are open disk-wide unless denied. CW_CODEX_DENY: colon list of absolute paths; CW_CODEX_DENY_GLOBS: colon list
+  # of globs under the work dir.
+  fs=""; glob=""
+  IFS=: read -ra denyp <<< "${CW_CODEX_DENY:-}"; IFS=: read -ra denyg <<< "${CW_CODEX_DENY_GLOBS:-}"
+  for p in "${denyp[@]+"${denyp[@]}"}"; do [ -n "$p" ] && fs+="\"$p\"=\"deny\","; done
+  for p in "${denyg[@]+"${denyg[@]}"}"; do [ -n "$p" ] && glob+="\"$p\"=\"deny\","; done
+  cx=(--json --skip-git-repo-check --ignore-user-config --ignore-rules -m "$cdx")
+  for f in apps browser_use computer_use image_generation goals memories plugins hooks view_image; do cx+=(--disable "$f"); done
+  for c in agents.enabled=false include_environment_context=false include_permissions_instructions=false \
+    include_apps_instructions=false include_collaboration_mode_instructions=false project_doc_max_bytes=0 \
+    skills.include_instructions=false skills.bundled.enabled=false shell_environment_policy.ignore_default_excludes=false \
+    "model_reasoning_effort=\"$effort\"" "model_instructions_file=\"$log.sp\"" \
+    "web_search=\"$([ -n "$web" ] && echo live || echo disabled)\"" 'default_permissions="cw"' \
+    "permissions.cw.extends=\"$([ "$role" = coder ] && echo :workspace || echo :read-only)\"" \
+    "permissions.cw.filesystem={$fs\":workspace_roots\"={${glob%,}}}"; do cx+=(-c "$c"); done
+  [ -n "$schema" ] && cx+=(--output-schema "$schema")
+  sub=(); [ -n "$resume" ] && sub=(resume "$resume")
+  cxev='fromjson? |
+    if .type=="thread.started" then {e:"init",sid:.thread_id}
+    elif .type=="item.started" then .item |
+      if .type=="command_execution" then {e:"tool",tool:"Bash",arg:(.command|tostring|.[0:120])}
+      elif .type=="file_change" then {e:"tool",tool:"Edit",arg:((.changes[0].path // "")|tostring|.[0:120])}
+      elif .type=="web_search" then {e:"tool",tool:"WebSearch",arg:((.query // "")|tostring|.[0:120])}
+      else empty end
+    elif .type=="item.completed" then .item |
+      if .type=="command_execution" then
+        (if .exit_code==0 then {e:"ok"} elif ((.aggregated_output // "")|test("Operation not permitted|Permission denied";"i")) then {e:"denied"} else {e:"error"} end)
+      elif .type=="file_change" then {e:(if .status=="failed" then "error" else "ok" end)}
+      elif .type=="web_search" then {e:"ok"}
+      elif .type=="reasoning" then {e:"think"} elif .type=="agent_message" then {e:"text"} else empty end
+    elif .type=="turn.completed" then {e:"result",ok:true,sub:"success",cin:.usage.cached_input_tokens,
+      nin:(.usage.input_tokens - .usage.cached_input_tokens),out:.usage.output_tokens}
+    elif .type=="turn.failed" then {e:"result",ok:false,sub:"failed"}
+    else empty end | .t=(now*1000|floor)'
+  printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" SHELL="$(command -v bash)" codex exec ${sub[@]+"${sub[@]}"} "${cx[@]}" -) 2> "$log.err" \
+    | tee "$log.jsonl" | jq -Rc --unbuffered "$cxev" > "$log.events" 2>/dev/null
+  rc=${PIPESTATUS[1]}
+  # Codex JSONL -> a Claude-shaped .json so everything below works unchanged. `error` events alone are not fatal: Codex
+  # also sends them for retries, so only a missing turn.completed fails the run.
+  jq -Rsc --arg m "$model" --arg sch "${schema:+1}" '[split("\n")[] | fromjson?] as $e
+    | ($e | map(select(.type=="turn.completed")) | last) as $d
+    | ($e | map(select(.type=="item.completed" and .item.type=="agent_message") | .item.text) | last // "") as $txt
+    | ($e | map(select(.type=="turn.failed" or .type=="error") | (.error.message // .message // "")) | last // "") as $err
+    | {type:"result", is_error:($d == null or $txt == ""),
+       subtype:(if $d == null then
+           (if ($err|test("usage limit|rate limit|quota";"i")) then "usage_limit"
+            elif ($err|test("context (window|length)|too long|too large";"i")) then "context_limit" else "failed" end)
+         elif $txt == "" then "empty_response" else "success" end),
+       result:(if $txt != "" then $txt else $err end), session_id:($e | map(select(.type=="thread.started") | .thread_id) | first // ""),
+       num_turns:(1 + ($e | map(select(.type=="item.completed" and (.item.type|test("command_execution|file_change|web_search")))) | length)),
+       usage:{input_tokens:(($d.usage.input_tokens // 0) - ($d.usage.cached_input_tokens // 0)), cache_creation_input_tokens:0,
+         cache_read_input_tokens:($d.usage.cached_input_tokens // 0), output_tokens:($d.usage.output_tokens // 0)},
+       modelUsage:{($m):{}}, permission_denials:[]}
+    + (if $sch != "" then {structured_output:($txt | fromjson? // null)} else {} end)' "$log.jsonl" > "$log.json"
 else
 # Opt-in client label: headless claude -p otherwise reports sdk-cli, which users measure as a faster 5-hour drain (anthropics/claude-code#97074).
 ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
@@ -383,6 +477,7 @@ jq -Rc 'fromjson? | select(.type=="result")' "$log.jsonl" | tail -1 > "$log.json
 fi
 sid=$(jq -r '.session_id // empty' "$log.json" 2>/dev/null); [ -n "$sid" ] && printf '%s\n' "$dir" > "$logdir/dirs/$sid"
 [ -n "$sid" ] && [ -n "$agy" ] && printf '%s\n' "$ah" > "$logdir/dirs/$sid.agy"   # its conversation lives in that home
+[ -n "$sid" ] && [ -n "$cdx" ] && printf '%s\n' "$cdx" > "$logdir/dirs/$sid.codex"   # a resume stays on Codex, same model
 # Lines this run changed (untracked files included), for the crew pane.
 tree1=$(snap)
 if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
@@ -395,6 +490,15 @@ if [ -n "$agy" ] && [ -n "$tree0" ] && [ "$tree1" = "$tree0" ] && grep -q RESOUR
   echo "cw: agy quota ran out mid-run (no file changes); rerunning on Claude" >&2
   CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
 fi
+# Codex hit a limit or a full context with no work to keep: run the same task on Claude. A coder that changed files
+# stops here, so the lead can hand that tree to a fresh Claude worker.
+case $([ -n "$cdx" ] && jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit)
+  if [ -z "$resume" ] && { [ "$role" != coder ] || { [ -n "$tree0" ] && [ "$tree1" = "$tree0" ]; }; }; then
+    echo "$rc" > "$log.done"; rm -f "$live" "$logdir/dirs/.codex-limits"
+    echo "cw: codex stopped ($(jq -r .subtype "$log.json")), no file changes; rerunning on Claude" >&2
+    CW_CODEX=0 CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
+  fi ;;
+esac
 # Turn limit: resume the same session with a standard message instead of making the lead do it.
 # The note below is not a "[cw " line, so cwwait keeps waiting for the final one.
 # Only when the segment made progress: files changed and most tool calls did not fail. A worker that

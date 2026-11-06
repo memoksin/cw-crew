@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# cwcodex — Codex plan limits as one JSON line {five, week, plan}: percent used per window. No model call, no tokens.
+# Reads `account/rateLimits/read` from `codex app-server`. cw caches the line for CW_CODEX_TTL seconds.
+set -uo pipefail
+command -v codex >/dev/null || { echo "cwcodex: needs codex on PATH" >&2; exit 2; }
+command -v jq >/dev/null || { echo "cwcodex: needs jq on PATH" >&2; exit 2; }
+# stdin stays open until the answer is read: app-server exits on EOF before it replies.
+perl -MIPC::Open2 -e '
+  $SIG{ALRM} = sub { kill "TERM", $pid; exit 1 }; alarm 15;
+  $pid = open2(my $out, my $in, "codex", "app-server");
+  print $in qq({"id":1,"method":"initialize","params":{"clientInfo":{"name":"cw","title":"cw","version":"0"}}}\n);
+  print $in qq({"method":"initialized"}\n{"id":2,"method":"account/rateLimits/read","params":{}}\n);
+  $in->flush;
+  while (<$out>) { if (/"id":2\b/) { print; kill "TERM", $pid; exit 0 } }
+  exit 1' 2>/dev/null | jq -ce '.result.rateLimits | {five: .primary.usedPercent, week: .secondary.usedPercent, plan: .planType}'

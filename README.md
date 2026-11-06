@@ -5,6 +5,7 @@ Claude Code plugin. The main session (Opus) leads; cheap headless workers do the
 - **`orchestrate` skill** — the playbook: scout → spec → coder → reviewer → verify, fleets, permissions, cost rules.
 - **`cw` CLI** (`bin/`, on the Bash PATH) — starts one `claude -p` worker with a ~3k-token cold start.
   - `scout` = Haiku, read-only (+ web with `-w`). `coder` = Sonnet, edits and runs tests (auto mode, risky calls come back as requests). `reviewer` = Sonnet, read-only, no web: a fresh context reads a diff that `cw` inlines and reports `BLOCKER` / `SUGGEST` lines with file:line.
+  - Codex tiers (`-M luna|sol|astra`, opt-in with `CW_CODEX=1`) run the official `codex` CLI on your ChatGPT plan: lean start (3.6k tokens), OS sandbox, fallback to Claude near the limit. `cwcodex` prints the limits without a model call.
   - Tiers (`-M`): `haiku`, `sonnet`, `opus` run on Claude. Opt-in with `CW_AGY=1`: `flash` (Gemini 3.8 Flash) runs on the Antigravity CLI (`agy`, signed in to a Google AI plan) and spend Google quota first; scouts then default to `flash`. Falls back to Claude when agy quota runs low. **agy tiers send the task and the files they read to Google.** Setup below.
   - Fleet tools: `cwgo` (run one worker, notify when it finishes or asks), `cwwait` (recovery waiter), `cwls`, `cwopen`, `cwwt` (one git worktree per writer), `cwkill`, `cwmark` (record correctness verdict on a worker run), `cwstats` (outcomes per model, tier and effort from the run logs).
 - **Crew pane** — pixel-art side pane: each worker as a creature on its own card, live state, questions with a raised hand. `/crew` opens it; it also opens itself when a worker starts.
@@ -89,6 +90,12 @@ makes git push and commit fail. A destructive command in another syntax can stil
 | Var | Default | What |
 |---|---|---|
 | `CW_SCOUT_MODEL` / `CW_CODER_MODEL` / `CW_REVIEWER_MODEL` | `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5` | worker models |
+| `CW_CODEX` | 0 | `1` = Codex tiers `luna`, `sol`, `astra` on; scouts default to `luna`, coders and reviewers to `sol`. **Tasks and the files workers read go to OpenAI** |
+| `CW_CODEX_MAX` | 90 | percent used (5h or weekly) at which a run falls back to Claude |
+| `CW_CODEX_TTL` | 60 | seconds one limit reading is reused (macOS; Linux reads every run) |
+| `CW_CODEX_DENY` | — | colon list of absolute paths Codex workers may not read. Reads are open disk-wide otherwise |
+| `CW_CODEX_DENY_GLOBS` | — | colon list of globs under the work dir that Codex workers may not read |
+| `CW_CODEX_LUNA`, `CW_CODEX_SOL`, `CW_CODEX_ASTRA` | `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | model behind each tier |
 | `CW_AGY` | 0 | `1` = agy tier `flash` on; scouts default to `flash` |
 | `CW_AGY_EXPLORE` | — | a date (YYYY-MM-DD): until then the lead adds extra flash work next to each task (on its proper tier) to tune Gemini prompts |
 | `CW_AGY_HOME` | `~/.claude/cw-agy` | colon list of agy homes, one per Google account, tried in order until one has quota. The first shares your own `agy` login; add more with `cwagy login DIR` |

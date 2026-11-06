@@ -14,7 +14,7 @@ echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"'"$
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
-unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
+unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
 fails=0
 ok() { echo "ok   $1"; }
 no() { echo "FAIL $1"; fails=$((fails + 1)); }
@@ -143,6 +143,53 @@ CW_ENTRYPOINT=cw-crew "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
 check "CW_ENTRYPOINT sets the client label" '[ "$(cat "$t/ep")" = cw-crew ]'
 CLAUDE_CODE_ENTRYPOINT=cli "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
 check "no CW_ENTRYPOINT: inherited label is scrubbed" '[ ! -s "$t/ep" ]'
+
+# Codex tiers: a fake codex records its args and prompt and plays the JSONL of FAKE_CX.
+cat > "$t/bin/codex" <<'C'
+#!/usr/bin/env bash
+if [ "$1" = app-server ]; then
+  read -r _; read -r _; read -r _
+  echo '{"id":1,"result":{}}'
+  echo '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":'"${FAKE_USED:-20}"'},"secondary":{"usedPercent":3},"planType":"plus"}}}'
+  sleep 5; exit 0
+fi
+printf '%s\n' "$@" > "$FAKE/cxargs"; cat > "$FAKE/cxprompt"
+echo '{"type":"thread.started","thread_id":"cx-1"}'
+case ${FAKE_CX:-ok} in
+  limit) echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit"}}'; exit 1 ;;
+  edit) echo x >> a.txt; echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit"}}'; exit 1 ;;
+  *) echo '{"type":"item.started","item":{"id":"1","type":"command_execution","command":"ls"}}'
+     echo '{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls","exit_code":0,"aggregated_output":""}}'
+     echo '{"type":"item.completed","item":{"id":"2","type":"agent_message","text":"'"${FAKE_TXT:-DONE cx}"'"}}'
+     echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":7}}' ;;
+esac
+C
+chmod +x "$t/bin/codex"; cx() { grep -qF -- "$1" "$t/cxargs"; }
+rm -f "$t/args" "$t/cxargs"
+CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "do it" > "$t/out" 2>"$t/err"; rc=$?
+check "-M sol runs Codex, report and meta line" '[ $rc = 0 ] && grep -q "DONE cx" "$t/out" && grep -q "^\[cw coder codex/gpt-6.1-sol .*rc=0 success sid=cx-1 turns=2 new_in=40 cache_r=60 out=7" "$t/err" && [ ! -e "$t/args" ]'
+check "Codex coder: lean flags, workspace sandbox, task on stdin" 'cx "agents.enabled=false" && cx "--ignore-user-config" && cx "permissions.cw.extends=\":workspace\"" && cx "web_search=\"disabled\"" && grep -q "do it" "$t/cxprompt"'
+check "Codex meta: quota for the pane, session marker" 'jq -e "select(.model==\"codex/gpt-6.1-sol\") | .agy.five == 80 and .agy.week == 97 and .agy.bucket == \"Codex\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null && [ "$(cat "$CW_LOG_DIR/dirs/cx-1.codex")" = gpt-6.1-sol ]'
+check "Codex events reach the pane format" 'grep -q "\"e\":\"tool\",\"tool\":\"Bash\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)"'
+CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -r cx-1 <<< "go on" >/dev/null 2>"$t/err"
+check "a Codex session resumes on Codex with its model" 'grep -qx resume "$t/cxargs" && grep -qx cx-1 "$t/cxargs" && cx gpt-6.1-sol'
+CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -w <<< "x" >/dev/null 2>"$t/err"
+check "CW_CODEX=1: scout defaults to Luna, read-only, -w turns web on" 'cx gpt-6-luna && cx "permissions.cw.extends=\":read-only\"" && cx "web_search=\"live\""'
+rm -f "$t/args"; CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -a 'Bash(ls)' <<< "x" >/dev/null 2>&1
+check "-a keeps the run on Claude" 'arg claude-sonnet-5-5'
+rm -f "$t/args"; CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"
+check "codex tiers off: sol falls back to Sonnet" 'arg claude-sonnet-5-5 && grep -q "codex tiers are off" "$t/err"'
+rm -f "$t/args"; FAKE_USED=95 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout <<< "x" >/dev/null 2>"$t/err"
+check "limit at CW_CODEX_MAX: scout falls back to Haiku" 'arg claude-haiku-5-5 && grep -q "Codex limit at 95% used" "$t/err"'
+rm -f "$t/args"; FAKE_CX=limit CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "limit mid-run, no changes: rerun on Claude" 'arg claude-sonnet-5-5 && grep -q "rerunning on Claude" "$t/err" && [ $rc = 0 ]'
+rm -f "$t/args"; git stash -qu 2>/dev/null; FAKE_CX=edit CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "limit mid-run with changes: stops for the lead" '[ ! -e "$t/args" ] && [ $rc != 0 ] && grep -q "usage_limit" "$t/err"'
+git checkout -q -- a.txt 2>/dev/null
+printf '{"type":"object"}' > "$t/o.json"
+FAKE_TXT='{\"ok\":true}' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -S "$t/o.json" <<< "x" > "$t/out" 2>"$t/err"
+check "-S on Codex: output schema, schema=pass" 'cx --output-schema && grep -q "schema=pass" "$t/err"'
+rm -f "$t/bin/codex"
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
