@@ -18,6 +18,7 @@
 {
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+. "$here/cwaccept.sh"
 for b in claude jq perl; do command -v "$b" >/dev/null || { echo "cw: needs $b on PATH" >&2; exit 2; }; done
 # A native jq.exe writes CRLF under Git Bash unless given --binary (jq >= 1.7); the CR would end up in $(...) values and run files.
 [ "$(jq -nr '"a"' 2>/dev/null)" = a ] || { command jq -b -n . >/dev/null 2>&1 && jq() { command jq -b "$@"; }; }
@@ -545,9 +546,7 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
   printf '{"e":"accept","t":%s}\n' "$(( $(date +%s) * 1000 ))" >> "$log.events"
   (cd "$dir" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$accept") > "$log.accept" 2>&1
   arc=$?; why="rc=$arc"
-  # Some runners (Godot) exit 0 when a test fails or does not load: failure lines count too. CW_ACCEPT_FAIL_RE= turns it off.
-  fre=${CW_ACCEPT_FAIL_RE-'^\s*(FAIL\b(?!:? *0\b)|SCRIPT ERROR)'}
-  if [ $arc -eq 0 ] && [ -n "$fre" ] && ! perl -e '$r = shift; while (<>) { exit 1 if /$r/ }' "$fre" "$log.accept"; then
+  if [ $arc -eq 0 ] && ! cw_accept_output_ok "$log.accept"; then
     arc=1; why=output
   fi
   if [ $arc -eq 0 ]; then acc=" accept=pass"; else

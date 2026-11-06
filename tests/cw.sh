@@ -208,5 +208,29 @@ check "Codex coder in a uv project: synced first, no sync in the sandbox" 'grep 
 rm -f "$t/bin/uv"
 rm -f "$t/bin/codex"
 
+# -A must check main-tree output too, even when the command exits 0 (worker run stays clean).
+for mode in fail script custom exit off zero; do
+  wt=$("$here/bin/cwwt" create accept 2>/dev/null)
+  printf 'applied\n' > "$wt/applied.txt"
+  case $mode in
+    fail|off) msg='FAIL test';; script) msg='SCRIPT ERROR: test';;
+    custom) msg='BROKEN test';; exit) msg='test exited';; zero) msg='FAIL: 0';;
+  esac
+  acc="if [ -d .git ]; then echo '$msg' >&2; [ '$mode' != exit ]; fi"
+  # An if with no matching branch exits 0 in the worker.
+  case $mode in custom) export CW_ACCEPT_FAIL_RE='^BROKEN';; off) export CW_ACCEPT_FAIL_RE=;; *) unset CW_ACCEPT_FAIL_RE;; esac
+  CW_FLEET=$t/fleet "$here/bin/cwgo" -A "apply-$mode" coder -W accept -T "$acc" <<< "x" > "$t/out" 2>"$t/err"
+  check "-A $mode: worker acceptance passes in [cw ...] meta" 'grep -q "^\[cw coder .* accept=pass " "$t/fleet/apply-$mode.err"'
+  case $mode in
+    off|zero)
+      check "-A $mode: main-tree output allowed" 'grep -q "^=== APPLIED " "$t/out" && [ -f applied.txt ] && [ ! -d "$wt" ]'
+      rm -f applied.txt ;;
+    *)
+      check "-A $mode: main-tree failure reverts patch" 'grep -q "^=== APPLY REVERTED " "$t/out" && [ ! -e applied.txt ] && [ -f "$wt/applied.txt" ]'
+      "$here/bin/cwwt" rm accept >/dev/null 2>&1 ;;
+  esac
+done
+unset CW_ACCEPT_FAIL_RE
+
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

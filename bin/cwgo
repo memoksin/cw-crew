@@ -50,6 +50,7 @@ else
 fi
 [ -s "$fleet/$n.task" ] || die "empty task"
 here=$(dirname "$0")
+. "$here/cwaccept.sh"
 CW_NAME=$n nohup "$here/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
 pid=$!
 echo $pid > "$fleet/$n.pid"
@@ -93,7 +94,7 @@ apply_worker() {
   fi
   stat=$(cd "$root" && git apply --stat "$patch" | tail -1)
   (cd "$root" && git apply "$patch") || { noapp "git apply failed"; rmdir "$lock"; return; }
-  if out=$(cd "$root" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$aacc" 2>&1); then
+  if out=$(cd "$root" && tlimit "${CW_ACCEPT_TMO:-1800}" bash -c "$aacc" 2>&1) && cw_accept_output_ok <<< "$out"; then
     (cd "$root" && "$cwwt" rm "$awt") >/dev/null 2>&1
     echo "=== APPLIED $n:$stat, main accept=pass, review=$rvtag"
   else
