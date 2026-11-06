@@ -153,7 +153,7 @@ if [ "$1" = app-server ]; then
   echo '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":'"${FAKE_USED:-20}"'},"secondary":{"usedPercent":3},"planType":"plus"}}}'
   sleep 5; exit 0
 fi
-printf '%s\n' "$@" > "$FAKE/cxargs"; cat > "$FAKE/cxprompt"
+printf '%s\n' "$@" > "$FAKE/cxargs"; cat > "$FAKE/cxprompt"; printf '%s\n' "${UV_NO_SYNC:-}" > "$FAKE/cxuv"
 echo '{"type":"thread.started","thread_id":"cx-1"}'
 case ${FAKE_CX:-ok} in
   limit) echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit"}}'; exit 1 ;;
@@ -189,6 +189,10 @@ git checkout -q -- a.txt 2>/dev/null
 printf '{"type":"object"}' > "$t/o.json"
 FAKE_TXT='{\"ok\":true}' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -S "$t/o.json" <<< "x" > "$t/out" 2>"$t/err"
 check "-S on Codex: output schema, schema=pass" 'cx --output-schema && grep -q "schema=pass" "$t/err"'
+mkdir "$t/py"; touch "$t/py/uv.lock"; printf '#!/bin/sh\necho "$@" > "$FAKE/uvargs"\n' > "$t/bin/uv"; chmod +x "$t/bin/uv"
+CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol -C "$t/py" <<< "x" >/dev/null 2>"$t/err"
+check "Codex coder in a uv project: synced first, no sync in the sandbox" 'grep -q "sync --frozen" "$t/uvargs" && grep -qx 1 "$t/cxuv"'
+rm -f "$t/bin/uv"
 rm -f "$t/bin/codex"
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1

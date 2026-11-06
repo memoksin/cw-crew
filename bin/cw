@@ -428,6 +428,12 @@ elif [ -n "$cdx" ]; then
     "permissions.cw.filesystem={$fs\":workspace_roots\"={${glob%,}}}"; do cx+=(-c "$c"); done
   [ -n "$schema" ] && cx+=(--output-schema "$schema")
   sub=(); [ -n "$resume" ] && sub=(resume "$resume")
+  # The sandbox has no network and cannot write uv's cache, so sync out here; inside, `uv run` only uses .venv.
+  uvenv=()
+  if [ "$role" = coder ] && [ -f "$dir/uv.lock" ] && command -v uv >/dev/null; then
+    (cd "$dir" && tlimit 300 uv sync --frozen -q </dev/null) || echo "cw: uv sync failed in $dir" >&2
+    uvenv=(UV_NO_SYNC=1 UV_CACHE_DIR="${TMPDIR:-/tmp}/cw-uv")
+  fi
   cxev='fromjson? |
     if .type=="thread.started" then {e:"init",sid:.thread_id}
     elif .type=="item.started" then .item |
@@ -445,7 +451,7 @@ elif [ -n "$cdx" ]; then
       nin:(.usage.input_tokens - .usage.cached_input_tokens),out:.usage.output_tokens}
     elif .type=="turn.failed" then {e:"result",ok:false,sub:"failed"}
     else empty end | .t=(now*1000|floor)'
-  printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" SHELL="$(command -v bash)" codex exec ${sub[@]+"${sub[@]}"} "${cx[@]}" -) 2> "$log.err" \
+  printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" ${uvenv[@]+"${uvenv[@]}"} SHELL="$(command -v bash)" codex exec ${sub[@]+"${sub[@]}"} "${cx[@]}" -) 2> "$log.err" \
     | tee "$log.jsonl" | jq -Rc --unbuffered "$cxev" > "$log.events" 2>/dev/null
   rc=${PIPESTATUS[1]}
   # Codex JSONL -> a Claude-shaped .json so everything below works unchanged. `error` events alone are not fatal: Codex
