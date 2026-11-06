@@ -411,12 +411,12 @@ elif [ -n "$cdx" ]; then
   # The lean start: 3.6k input tokens against 27k for a plain `codex exec`. agents.enabled is the switch that removes
   # the multi-agent tools and text; --disable multi_agent does not. Ignoring the user config also drops MCP and plugins.
   printf '%s\n' "$sp" > "$log.sp"
-  # Reads are open disk-wide unless denied. CW_CODEX_DENY: colon list of absolute paths; CW_CODEX_DENY_GLOBS: colon list
-  # of globs under the work dir.
+  # Reads are open disk-wide unless denied. Env lists add to these defaults; leave ~/.codex available for auth/runtime.
   fs=""; glob=""
-  IFS=: read -ra denyp <<< "${CW_CODEX_DENY:-}"; IFS=: read -ra denyg <<< "${CW_CODEX_DENY_GLOBS:-}"
-  for p in "${denyp[@]+"${denyp[@]}"}"; do [ -n "$p" ] && fs+="\"$p\"=\"deny\","; done
-  for p in "${denyg[@]+"${denyg[@]}"}"; do [ -n "$p" ] && glob+="\"$p\"=\"deny\","; done
+  IFS=: read -ra denyp <<< "$HOME/.ssh:$HOME/.aws:$HOME/.azure:$HOME/.config/gcloud:$HOME/.gnupg:$HOME/.netrc:$HOME/.config/gh:${CW_CODEX_DENY:-}"
+  IFS=: read -ra denyg <<< "**/.env:**/.env.*:**/*.pem:**/*.key:**/*.p8:**/*.p12:**/*.pfx:**/*.crt:**/*.cer:**/*.der:**/*.jks:**/*.keystore:**/local.properties:${CW_CODEX_DENY_GLOBS:-}"
+  for p in "${denyp[@]}"; do [ -n "$p" ] && [[ $fs != *"\"$p\"=\"deny\","* ]] && fs+="\"$p\"=\"deny\","; done
+  for p in "${denyg[@]}"; do [ -n "$p" ] && [[ $glob != *"\"$p\"=\"deny\","* ]] && glob+="\"$p\"=\"deny\","; done
   cx=(--json --skip-git-repo-check --ignore-user-config --ignore-rules -m "$cdx")
   for f in apps browser_use computer_use image_generation goals memories plugins hooks view_image; do cx+=(--disable "$f"); done
   for c in agents.enabled=false include_environment_context=false include_permissions_instructions=false \

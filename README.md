@@ -93,8 +93,8 @@ makes git push and commit fail. A destructive command in another syntax can stil
 | `CW_CODEX` | 0 | `1` = Codex tiers `luna`, `sol`, `astra` on; scouts default to `luna`, coders and reviewers to `sol`. **Tasks and the files workers read go to OpenAI** |
 | `CW_CODEX_MAX` | 90 | percent used (5h or weekly) at which a run falls back to Claude |
 | `CW_CODEX_TTL` | 60 | seconds one limit reading is reused (macOS; Linux reads every run) |
-| `CW_CODEX_DENY` | — | colon list of absolute paths Codex workers may not read. Reads are open disk-wide otherwise |
-| `CW_CODEX_DENY_GLOBS` | — | colon list of globs under the work dir that Codex workers may not read |
+| `CW_CODEX_DENY` | `$HOME/` + `.ssh`, `.aws`, `.azure`, `.config/gcloud`, `.gnupg`, `.netrc`, `.config/gh` | colon list of extra absolute paths Codex workers may not read; defaults always apply. Other reads remain open; `.codex` is not denied (auth/runtime) |
+| `CW_CODEX_DENY_GLOBS` | `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/*.p8`, `**/*.p12`, `**/*.pfx`, `**/*.crt`, `**/*.cer`, `**/*.der`, `**/*.jks`, `**/*.keystore`, `**/local.properties` | colon list of extra denied globs under the work dir; defaults always apply, at any depth (including the root) |
 | `CW_CODEX_LUNA`, `CW_CODEX_SOL`, `CW_CODEX_ASTRA` | `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | model behind each tier |
 | `CW_AGY` | 0 | `1` = agy tier `flash` on; scouts default to `flash` |
 | `CW_AGY_EXPLORE` | — | a date (YYYY-MM-DD): until then the lead adds extra flash work next to each task (on its proper tier) to tune Gemini prompts |

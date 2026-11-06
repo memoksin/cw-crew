@@ -165,16 +165,29 @@ case ${FAKE_CX:-ok} in
 esac
 C
 chmod +x "$t/bin/codex"; cx() { grep -qF -- "$1" "$t/cxargs"; }
+unset CW_CODEX_DENY CW_CODEX_DENY_GLOBS
+cxdefaults() {
+  local p
+  for p in .ssh .aws .azure .config/gcloud .gnupg .netrc .config/gh; do
+    cx "\"$HOME/$p\"=\"deny\"" || return 1
+  done
+  for p in '**/.env' '**/.env.*' '**/*.pem' '**/*.key' '**/*.p8' '**/*.p12' '**/*.pfx' '**/*.crt' '**/*.cer' '**/*.der' '**/*.jks' '**/*.keystore' '**/local.properties'; do
+    cx "\"$p\"=\"deny\"" || return 1
+  done
+  ! cx "\"$HOME/.codex\"=\"deny\""
+}
 rm -f "$t/args" "$t/cxargs"
 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "do it" > "$t/out" 2>"$t/err"; rc=$?
 check "-M sol runs Codex, report and meta line" '[ $rc = 0 ] && grep -q "DONE cx" "$t/out" && grep -q "^\[cw coder codex/gpt-6.1-sol .*rc=0 success sid=cx-1 turns=2 new_in=40 cache_r=60 out=7" "$t/err" && [ ! -e "$t/args" ]'
 check "Codex coder: lean flags, workspace sandbox, task on stdin" 'cx "agents.enabled=false" && cx "--ignore-user-config" && cx "permissions.cw.extends=\":workspace\"" && cx "web_search=\"disabled\"" && grep -q "do it" "$t/cxprompt"'
+check "Codex denies common credentials and workspace secrets without user config" 'cxdefaults'
 check "Codex meta: quota for the pane, session marker" 'jq -e "select(.model==\"codex/gpt-6.1-sol\") | .agy.five == 80 and .agy.week == 97 and .agy.bucket == \"Codex\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null && [ "$(cat "$CW_LOG_DIR/dirs/cx-1.codex")" = gpt-6.1-sol ]'
 check "Codex events reach the pane format" 'grep -q "\"e\":\"tool\",\"tool\":\"Bash\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)"'
 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -r cx-1 <<< "go on" >/dev/null 2>"$t/err"
 check "a Codex session resumes on Codex with its model" 'grep -qx resume "$t/cxargs" && grep -qx cx-1 "$t/cxargs" && cx gpt-6.1-sol'
-CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -w <<< "x" >/dev/null 2>"$t/err"
+CW_CODEX_DENY="$t/private:$HOME/.ssh" CW_CODEX_DENY_GLOBS='**/secret.json:**/.env' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -w <<< "x" >/dev/null 2>"$t/err"
 check "CW_CODEX=1: scout defaults to Luna, read-only, -w turns web on" 'cx gpt-6-luna && cx "permissions.cw.extends=\":read-only\"" && cx "web_search=\"live\""'
+check "Codex env denies add to defaults without duplicate TOML keys" 'cxdefaults && cx "\"$t/private\"=\"deny\"" && cx "\"**/secret.json\"=\"deny\"" && [ "$(grep -oF "\"$HOME/.ssh\"=\"deny\"" "$t/cxargs" | wc -l | tr -d " ")" = 1 ] && [ "$(grep -oF "\"**/.env\"=\"deny\"" "$t/cxargs" | wc -l | tr -d " ")" = 1 ]'
 rm -f "$t/args"; CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -a 'Bash(ls)' <<< "x" >/dev/null 2>&1
 check "-a keeps the run on Claude" 'arg claude-sonnet-5-5'
 rm -f "$t/args"; CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"
