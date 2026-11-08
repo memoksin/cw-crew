@@ -13,7 +13,7 @@ so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
 echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
-export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0
+export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_CODEX=0
 unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
 fails=0
 ok() { echo "ok   $1"; }
@@ -77,13 +77,12 @@ check "scout unchanged: Haiku, low, read-only, 40 turns" 'arg claude-haiku-5-5 &
 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
 check "coder unchanged: Sonnet, medium, edits" 'arg claude-sonnet-5-5 && arg medium && arg Read,Edit,Write,Bash'
 
-# Tiers: agy tiers are off unless CW_AGY=1 and then fall back to Claude; Claude tiers pick the model.
-"$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"
-check "agy tier off: flash coder falls back to Sonnet" 'arg claude-sonnet-5-5 && grep -q "agy tiers are off" "$t/err"'
+# Tiers: Claude tiers pick the model; any other name is rejected.
 "$here/bin/cw" scout -M opus <<< "x" >/dev/null 2>&1
 check "-M opus picks Opus 5.5" 'arg claude-opus-5-5'
-"$here/bin/cw" reviewer -M flash -W w1 </dev/null >/dev/null 2>"$t/err"
-check "agy tier off: flash reviewer falls back to Sonnet" 'arg claude-sonnet-5-5 && grep -q "agy tiers are off" "$t/err" && grep -q "using claude-sonnet-5-5" "$t/err"'
+rm -f "$t/args"
+"$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "flash is an unknown tier: usage, rc 2, no model call" '[ $rc = 2 ] && grep -q "^usage: cw" "$t/err" && [ ! -e "$t/args" ]'
 
 # Jev: a sure high stays high, an unsure high runs at medium (fake curl answers for the decisions API).
 cat > "$t/bin/curl" <<'C'
@@ -98,20 +97,7 @@ check "Jev unsure high (60%) runs at medium" 'arg medium && ! arg high'
 check "meta keeps Jev's own pick" 'jq -e ".effort_jev == \"high\" and .effort == \"medium\"" "$(command ls -t "$t"/logs/*.meta | head -1)" >/dev/null'
 rm -f "$t/bin/curl"
 
-# agy runs out of quota mid-run with no file changes: cw reruns the task on Claude, and agy's rc 3 is not a QUESTION.
-cat > "$t/bin/agy" <<'A'
-#!/usr/bin/env bash
-case "$*" in *"/usage"*) printf 'Gemini Models\tFive Hour Limit Remaining\t90%%\tx\nGemini Models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
-echo '{"event":"init","conversation_id":"agy-1"}'
-echo '{"event":"result","result":{"conversation_id":"agy-1","status":"ERROR","response":"","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1,"cache_read_tokens":9}}}'
-echo 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}' >&2; exit 3
-A
-chmod +x "$t/bin/agy"; rm -f "$t/args"
-CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"; rc=$?
-check "agy quota out mid-run: rerun on Claude Sonnet" 'arg claude-sonnet-5-5 && grep -q "rerunning on Claude" "$t/err" && [ $rc = 0 ]'
-rm -f "$t/bin/agy"
-
-# -S schema: forwarded compact, bad file exits 2 before the model, pass/FAIL in the meta line, agy falls back.
+# -S schema: forwarded compact, bad file exits 2 before the model, pass/FAIL in the meta line.
 printf '{\n "type": "object"\n}\n' > "$t/s.json"; printf '{bad' > "$t/bad.json"; rm -f "$t/args"
 out=$(FAKE_SO=1 "$here/bin/cw" scout -S "$t/s.json" <<< "x" 2>"$t/err"); rc=$?
 check "-S: schema forwarded compact via --json-schema" 'grep -qx -- --json-schema "$t/args" && arg "{\"type\":\"object\"}"'
@@ -123,15 +109,6 @@ rm -f "$t/args"
 check "-S: invalid JSON exits 2, no model call" '[ $rc = 2 ] && grep -q "not valid JSON" "$t/err" && [ ! -e "$t/args" ]'
 "$here/bin/cw" scout -S "$t/none.json" <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "-S: missing file exits 2, no model call" '[ $rc = 2 ] && grep -q "no such schema file" "$t/err" && [ ! -e "$t/args" ]'
-cat > "$t/bin/agy" <<'A'
-#!/usr/bin/env bash
-case "$*" in *"/usage"*) printf 'Gemini Models\tFive Hour Limit Remaining\t90%%\tx\nGemini Models\tWeekly Limit Remaining\t90%%\tx\n'; exit 0 ;; esac
-exit 1
-A
-chmod +x "$t/bin/agy"
-CW_AGY=1 CW_AGY_HOME=$t/agyhome "$here/bin/cw" scout -M flash -S "$t/s.json" <<< "x" >/dev/null 2>"$t/err"
-check "-S: agy tier falls back to the Claude model" 'arg claude-haiku-5-5 && arg --json-schema && grep -q "^cw: -S needs a Claude tier, using claude-haiku-5-5" "$t/err"'
-rm -f "$t/bin/agy"
 
 : > "$t/empty.json"
 "$here/bin/cw" scout -S "$t/empty.json" <<< "x" >/dev/null 2>&1; rc=$?
@@ -181,7 +158,7 @@ CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "do it" > "$t/out" 2>"
 check "-M sol runs Codex, report and meta line" '[ $rc = 0 ] && grep -q "DONE cx" "$t/out" && grep -q "^\[cw coder codex/gpt-6.1-sol .*rc=0 success sid=cx-1 turns=2 new_in=40 cache_r=60 out=7" "$t/err" && [ ! -e "$t/args" ]'
 check "Codex coder: lean flags, workspace sandbox, task on stdin" 'cx "agents.enabled=false" && cx "--ignore-user-config" && cx "permissions.cw.extends=\":workspace\"" && cx "web_search=\"disabled\"" && grep -q "do it" "$t/cxprompt"'
 check "Codex denies common credentials and workspace secrets without user config" 'cxdefaults'
-check "Codex meta: quota for the pane, session marker" 'jq -e "select(.model==\"codex/gpt-6.1-sol\") | .agy.five == 80 and .agy.week == 97 and .agy.bucket == \"Codex\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null && [ "$(cat "$CW_LOG_DIR/dirs/cx-1.codex")" = gpt-6.1-sol ]'
+check "Codex meta: quota for the pane, session marker" 'jq -e "select(.model==\"codex/gpt-6.1-sol\") | .quota.five == 80 and .quota.week == 97 and .quota.bucket == \"Codex\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null && [ "$(cat "$CW_LOG_DIR/dirs/cx-1.codex")" = gpt-6.1-sol ]'
 check "Codex events reach the pane format" 'grep -q "\"e\":\"tool\",\"tool\":\"Bash\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)"'
 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -r cx-1 <<< "go on" >/dev/null 2>"$t/err"
 check "a Codex session resumes on Codex with its model" 'grep -qx resume "$t/cxargs" && grep -qx cx-1 "$t/cxargs" && cx gpt-6.1-sol'

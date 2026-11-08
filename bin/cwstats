@@ -98,42 +98,21 @@ perl -MJSON::PP -e '
       }
     }
 
-    # .events: scan for accept_end, error, tool, last event t
+    # .events: scan for accept_end, last event t
     if ($has{events}) {
       my $ef = "$dir{$b}/$b.events";
       if (open my $eh, "<", $ef) {
-        my ($last_t, $errs, $accept_ok, $accept_total) = (0, 0, 0, 0);
-        my @abs_tools;
+        my ($last_t, $accept_ok, $accept_total) = (0, 0, 0);
         while (<$eh>) {
           my $ev = eval { $j->decode($_) } or next;
           my $e = $ev->{e} // ""; my $t = $ev->{t} // 0;
           $last_t = $t if $t > $last_t;
           if ($e eq "accept_end") { $accept_total++; $accept_ok++ if $ev->{ok}; }
-          elsif ($e eq "error") { $errs++; }
-          elsif ($e eq "tool" && defined $ev->{arg} && $ev->{arg} =~ m{^/}) {
-            push @abs_tools, $ev->{arg};
-          }
         }
         close $eh;
         $r{last_t}       = $last_t;
-        $r{err_events}   = $errs;
         $r{accept_ok}    = $accept_ok;
         $r{accept_total} = $accept_total;
-        # outside reads: abs path tools not under workdir
-        my $sid = $r{session_id} // "";
-        my $wdir = "";
-        if ($sid && -f "$logdir/dirs/$sid") {
-          if (open my $wfh, "<", "$logdir/dirs/$sid") {
-            chomp($wdir = <$wfh>); close $wfh;
-          }
-        }
-        my $outside = 0;
-        if ($wdir ne "") {
-          for my $p (@abs_tools) {
-            $outside++ unless index($p, "$wdir/") == 0 || $p eq $wdir;
-          }
-        }
-        $r{outside_reads} = $outside;
       }
     }
     print $j->encode(\%r), "\n";
@@ -147,8 +126,7 @@ def effort_rank:
   if . == "low" then 1 elif . == "medium" then 2 elif . == "high" then 3
   elif . == "xhigh" then 4 elif . == "max" then 5 else 0 end;
 def model_rank:
-  if test("gemini.*flash") then 1
-  elif test("haiku|luna") then 1
+  if test("haiku|luna") then 1
   elif test("claude-sonnet-4-6") then 2
   elif test("claude-opus-4-6") then 3
   elif test("claude-sonnet-5-5|sol") then 4
@@ -241,23 +219,6 @@ def fmt_mins: if . == null then "" else (. | round | tostring) + "m" end;
   )
 ) as $t2 |
 
-# ──────────────────── TABLE 3: agy prompt signals ────────────────────
-($runs | map(select(.model | test("^agy/"))) |
-  group_by(.model) | map(. as $grp | $grp[0].model as $mdl |
-    {
-      model: $mdl,
-      runs: ($grp | length),
-      empty: ([$grp[] | select(.has_json == 1 and (.subtype == "empty_response" or (.result_str // "") == ""))] | length),
-      md_links: ([$grp[] | select((.result_str // "") | test("\\]\\(file://"))] | length),
-      outside_reads: ([$grp[] | .outside_reads // 0] | add // 0),
-      tool_errs_mean: (
-        [$grp[] | .err_events // 0] |
-        if length == 0 then 0 else (add / length * 10 | round) / 10 end
-      )
-    }
-  ) | sort_by(.model)
-) as $t3 |
-
 if $export == 1 then
   {
     schema: 1,
@@ -265,8 +226,7 @@ if $export == 1 then
     days: ($days | tonumber),
     tables: {
       by_role_model_effort: [$t1[] | {role, model, effort, runs, ok_pct: pct(.ok; .runs), max_turns, timeout, ask, accept_pass, accept_total, right, marked, escalated_pct: pct(.escalated; .runs), med_turns, med_cost, med_mins}],
-      jev_effort: [$t2[] | {label, runs, ok_pct: pct(.ok; .runs), right, marked, escalated_pct: pct(.escalated; .runs), med_turns, med_cost}],
-      agy_signals: [$t3[] | {model, runs, empty, md_links, outside_reads, tool_errs_mean}]
+      jev_effort: [$t2[] | {label, runs, ok_pct: pct(.ok; .runs), right, marked, escalated_pct: pct(.escalated; .runs), med_turns, med_cost}]
     }
   }
 else
@@ -304,17 +264,6 @@ def rpad(n): tostring | (" " * (n - length)) + . | .[-(n):];
   (pct(.escalated; .runs) | rpad(5)) + " " +
   ((.med_turns // "" | if . == "" then "" else (. | round) end) | rpad(6)) + " " +
   (.med_cost | fmt_cost | rpad(7))
-] | join("\n")) + "\n\n" +
-
-"agy prompt signals\n" +
-"MODEL                       RUNS  EMPTY MDLNK OUTRD TERR/RUN\n" +
-([$t3[] |
-  (.model | pad(28)) +
-  (.runs | rpad(5)) + " " +
-  (.empty | rpad(5)) + " " +
-  (.md_links | rpad(5)) + " " +
-  (.outside_reads | rpad(5)) + " " +
-  (.tool_errs_mean | rpad(8))
 ] | join("\n"))
 
 end

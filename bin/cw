@@ -8,8 +8,7 @@
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
 #   -W name: run in a git worktree outside the repo (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
-#   -M tier: flash (Gemini on the Antigravity CLI, Google AI quota), luna|sol|astra (Codex, ChatGPT plan quota) or
-#     haiku|sonnet|opus (Claude). See the tier block.
+#   -M tier: luna|sol|astra (Codex, ChatGPT plan quota) or haiku|sonnet|opus (Claude). See the tier block.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
@@ -32,7 +31,7 @@ tlimit() {
 }
 
 usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-S schema.json] < task" >&2; exit 2; }
-argv=("$@")   # for a rerun on Claude when agy runs out of quota mid-run
+argv=("$@")   # for a rerun on Claude when Codex hits a limit
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
 base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""
@@ -98,7 +97,7 @@ report="Final message is your report: English, terse, max 15 lines. No code dump
 ro_allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
           "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
 
-# Coder rules, also turned into agy deny rules below. Risky but sometimes needed: in -p mode an "ask" rule is a denial,
+# Coder rules. Risky but sometimes needed: in -p mode an "ask" rule is a denial,
 # which the worker turns into a PERMISSION request for the lead (see SKILL.md). Hard-never actions stay in --disallowedTools.
 coder_ask='["Bash(sudo *)","Bash(rm -r *)","Bash(rm -fr *)","Bash(rm -R *)","Bash(chmod *)","Bash(chown *)","Bash(kill *)",
   "Bash(git checkout *)","Bash(git restore *)","Bash(git stash *)","Bash(git rebase *)","Bash(git branch -D *)","Bash(git worktree *)",
@@ -146,22 +145,18 @@ if [ ${#granted[@]} -gt 0 ]; then
       | $r]' "${granted[@]}" <<< "${ask:-[]}")
 fi
 
-# Tier (-M): flash runs Gemini on the Antigravity CLI (agy; Google AI plan quota) and needs CW_AGY=1;
-# haiku, sonnet, opus run on Claude. Default: coder sonnet; scout flash with CW_AGY=1, else (and with -w) haiku;
-# reviewer keeps CW_REVIEWER_MODEL unless -M names a tier (flash: Gemini, read-only tools).
-# An agy tier falls back to the role's Claude model when agy tiers are off, the run needs -w or -a, agy is missing,
-# or no home in CW_AGY_HOME has quota (5h and weekly) at or above CW_AGY_MIN percent.
+# Tier (-M): haiku, sonnet, opus run on Claude. Default: coder sonnet; scout haiku;
+# reviewer keeps CW_REVIEWER_MODEL unless -M names a tier.
 # luna, sol, astra run on Codex (ChatGPT plan quota) and need CW_CODEX=1, which also makes them the role defaults: scout
 # luna, coder and reviewer sol. They fall back to Claude (haiku/sonnet, astra: opus) when Codex is off or missing, the run
 # needs -a, or either limit window is at CW_CODEX_MAX percent used. A Claude session keeps resuming on Claude.
 if [ -z "$tier" ] && [ "${CW_CODEX:-0}" = 1 ] && [ ${#granted[@]} -eq 0 ] && { [ -z "$resume" ] || [ -f "$logdir/dirs/$resume.codex" ]; }; then
   [ "$role" = scout ] && tier=luna || tier=sol
 fi
-[ -n "$tier" ] || [ "$role" = reviewer ] || { if [ "$role" = coder ]; then tier=sonnet; elif [ -n "$web" ] || [ "${CW_AGY:-0}" != 1 ]; then tier=haiku; else tier=flash; fi; }
-agy=""; cdx=""
+[ -n "$tier" ] || [ "$role" = reviewer ] || { if [ "$role" = coder ]; then tier=sonnet; else tier=haiku; fi; }
+cdx=""
 case $tier in
   "") ;;
-  flash) agy=gemini-3.8-flash-high ;;   # agy's Claude models are not offered: their quota bucket is tiny
   luna) cdx=${CW_CODEX_LUNA:-gpt-6-luna} ;; sol) cdx=${CW_CODEX_SOL:-gpt-6.1-sol} ;; astra) cdx=${CW_CODEX_ASTRA:-gpt-6-astra} ;;
   haiku) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; sonnet) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; opus) model=claude-opus-5-5 ;;
   *) usage ;;
@@ -194,83 +189,11 @@ if [ -n "$cdx" ]; then
     sp="$sp You run in an OS sandbox: writes outside the work dir, the network and .git are blocked, and a blocked call cannot be approved. Use your shell tool and apply_patch. Never spawn sub-agents and never wait for the user."
   fi
 fi
-if [ -n "$agy" ]; then
-  # agy keeps settings and login under $HOME: each home in CW_AGY_HOME is a HOME of symlinks to the real one (see
-  # cwagy) with cw's own settings.json (deny rules) and agents/. Tool commands see this HOME too.
-  # Homes are tried in order: the first with quota left runs the task; a resume goes back to its session's home.
-  why=""; ah=""; usage=""; agyhomes="[]"
-  if [ "${CW_AGY:-0}" != 1 ]; then why="agy tiers are off (CW_AGY=1 turns them on)"
-  elif [ -n "$web" ]; then why="agy tiers have no web tools"
-  elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
-  elif [ -n "$schema" ]; then why="-S needs a Claude tier"
-  elif ! command -v agy >/dev/null; then why="agy not on PATH"
-  elif [ -n "$resume" ] && [ -f "$logdir/dirs/$resume.agy" ]; then ah=$(cat "$logdir/dirs/$resume.agy")
-  else
-    case $agy in gemini*) bucket="Gemini Models" ;; *) bucket="Claude and GPT models" ;; esac
-    IFS=: read -ra homes <<< "${CW_AGY_HOME:-$HOME/.claude/cw-agy}"; kind=first; notes=""
-    for h in "${homes[@]}"; do
-      "$here/cwagy" prep "$h" "$kind"; kind=extra
-      usage=$(cd "$h" && HOME=$h tlimit 15 agy -p /usage < /dev/null 2>/dev/null)
-      quota=$(awk -F'\t' -v b="$bucket" '$1 == b { v = $3 + 0; if (m == "" || v < m) m = v } END { print m }' <<< "$usage")
-      # every line of the output goes to .meta for the pane: percent remaining per bucket and window
-      pv() { awk -F'\t' -v b="$1" -v w="$2" '$1 == b && $2 ~ w { print $3 + 0; exit }' <<< "$usage"; }
-      agyhomes=$(jq -c --arg h "${h##*/}" --arg g5 "$(pv "Gemini Models" '^Five')" --arg gw "$(pv "Gemini Models" '^Weekly')" \
-        --arg c5 "$(pv "Claude and GPT models" '^Five')" --arg cw "$(pv "Claude and GPT models" '^Weekly')" \
-        '. + [{home: $h, gemini_five: ($g5 | tonumber? // null), gemini_week: ($gw | tonumber? // null), claude_five: ($c5 | tonumber? // null), claude_week: ($cw | tonumber? // null)}]' <<< "$agyhomes")
-      if [ -z "$quota" ]; then notes+=" ${h##*/}: no quota (signed in? cwagy login $h)"
-      elif [ "$quota" -lt "${CW_AGY_MIN:-5}" ]; then notes+=" ${h##*/}: $quota%"
-      else ah=$h; break; fi
-    done
-    [ -n "$ah" ] || why="no agy home has '$bucket' quota left:$notes"
-  fi
-  if [ -n "$why" ]; then
-    [ -n "$resume" ] && { echo "cw: $why; an agy session cannot resume on Claude: rerun it fresh" >&2; exit 2; }
-    if [ "$role" = scout ]; then model=${CW_SCOUT_MODEL:-claude-haiku-5-5}
-    elif [ "$role" = reviewer ]; then model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5}
-    else model=${CW_CODER_MODEL:-claude-sonnet-5-5}; fi
-    echo "cw: $why, using $model" >&2; agy=""
-  fi
-fi
-if [ -n "$agy" ]; then
-  model=agy/$agy
-  # agy has no read-scope rule that works for custom agents in headless mode, so runs skip permission prompts: the
-  # agent's tool list and the deny rules (cw's ask and hard rules, prefix-matched, so never wider) are the guard.
-  deny=()
-  while IFS= read -r r; do
-    case $r in
-      Bash\(*\*\)) p=${r#Bash(}; p=${p%)}; p=${p#\*}; p=${p%%\**}; p=${p%% }; [ -n "$p" ] && deny+=("command($p)") ;;
-      Edit\(~/*|Write\(~/*) p=${r#*(~/}; p=${p%%\**}; p=${p%)}; p=${p%/}
-        if [ "$p" = . ]; then for e in "$HOME"/.[!.]*; do deny+=("write_file($e)" "write_file($ah/${e##*/})"); done
-        else deny+=("write_file($HOME/$p)" "write_file($ah/$p)"); fi ;;
-    esac
-  done < <(printf '%s\n' "${hard[@]}"; jq -r '.[]' <<< "$coder_ask")
-  deny+=("command(bash -c)" "command(sh -c)" "command(zsh -c)" "command(eval)")   # bare bash/sh/zsh rules: their -c bypass
-  put() { [ "$(cat "$1" 2>/dev/null)" = "$2" ] || { printf '%s\n' "$2" > "$1.$$" && mv "$1.$$" "$1"; }; }   # atomic: runs share it
-  put "$ah/.gemini/antigravity-cli/settings.json" "$(jq -n --args '{permissions: {deny: ($ARGS.positional | unique)}}' "${deny[@]}")"
-  # Gemini follows short prompts loosely: name the method, the stop point and the citation rule.
-  pin="Open and edit files only inside the workspace the task names; never touch the home directory, dotfiles or other projects. Cite path:line as plain text, no markdown links. No preamble, no restating the task."
-  if [ "$role" = scout ]; then
-    aname=cw-scout; atools="view_file, grep_search, find_by_name, list_dir"
-    sp="You are a read-only research worker for an orchestrator. Do only the task. $pin Method: locate with grep_search or find_by_name, then view_file a line range around each hit; do not read whole large files. Files given inline in the task are already read: do not open them again. Stop as soon as every question in the task is answered; no extra exploration. Every fact cites path:line from a file you opened in this run; mark anything else NOT CHECKED. Never guess a name, path or number. A 'none found' claim names the search and its hit count. $report"
-  elif [ "$role" = reviewer ]; then
-    aname=cw-reviewer; atools="view_file, grep_search, find_by_name, list_dir"
-    sp="You are a read-only code reviewer for an orchestrator. Do only the task. $pin Judge only the inline diff against the task; read a file only to confirm a finding; stop after at most 10 findings; no praise, no summary of the change; a finding you could not confirm is UNSURE, never BLOCKER. Report real defects: wrong behavior, broken contract or spec rule, missing test, security. Skip style unless asked. Report: English, max 15 lines. Line 1: 'DONE review: N blocker, M suggest' or 'DONE review: clean'; 'BLOCKED <why>' if you could not review. Then one line per finding: 'BLOCKER path:line - problem; fix' or 'SUGGEST path:line - ...'. If a real ambiguity stops you, last line: QUESTION: <one question>."
-  else
-    aname=cw-coder; atools="view_file, grep_search, find_by_name, list_dir, write_to_file, replace_file_content, multi_replace_file_content, run_command"
-    # Every turn resends the whole context: no sleep polling, no re-reading the same lines.
-    sp="${sp/ To wait for something*between checks./}"
-    sp="$pin Change only what the task asks: no refactors, renames, reformatting or new comments. After each edit, view only the changed lines once to confirm them. Run commands in the foreground and wait for their exit; never poll with sleep or re-check a command in a loop. View line ranges, not whole large files, and never view the same lines twice unless you changed them. $sp"
-  fi
-  mkdir -p "$ah/.gemini/antigravity-cli/agents"
-  put "$ah/.gemini/antigravity-cli/agents/$aname.md" "$(printf -- '---\nname: %s\ndescription: cw-crew %s\ntools: [%s]\n---\n# Instructions\n%s' "$aname" "$role" "$atools" "$sp")"
-fi
-
 
 # Effort: an explicit -e wins; a resume keeps the effort of the run it continues; otherwise, only with CW_JEV=1,
 # Jev picks it from the spec (OpenRouter decisions API, ~1 s, ~$0.00002; sends the first 20k chars of the task).
 # Jev must be sure (p >= CW_JEV_SURE %, default 70) to pick high; a less sure high runs at medium, since a run that
 # falls short is retried higher (on past runs this matched a blind review better: 23/26 vs 20/26).
-# agy runs skip Jev: agy takes no --effort.
 # Off or any failure: the role default.
 effort_src=flag; effort_p=""; effort_jev=""
 if [ "$effort" = auto ]; then
@@ -280,7 +203,7 @@ if [ "$effort" = auto ]; then
   [ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
   if [ -n "$prev" ] && [ -f "${prev%.json}.meta" ] && pe=$(jq -re '.effort // empty' "${prev%.json}.meta" 2>/dev/null); then
     effort=$pe; effort_src=resume
-  elif [ -z "$agy" ] && [ "${CW_JEV:-0}" = 1 ] && key=${OPENROUTER_API_KEY:-$([ -n "${CW_JEV_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_JEV_KEYCHAIN" -w 2>/dev/null)}; [ -n "${key:-}" ]; then
+  elif [ "${CW_JEV:-0}" = 1 ] && key=${OPENROUTER_API_KEY:-$([ -n "${CW_JEV_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_JEV_KEYCHAIN" -w 2>/dev/null)}; [ -n "${key:-}" ]; then
     req=$(jq -nc --arg m "${CW_JEV_MODEL:-typesafe/jev-1.13}" --arg role "$role" --arg wm "$model" --arg spec "${spec:0:20000}" \
       --arg files "${files[*]+"${files[*]}"}" '{model: $m,
       state: {worker_role: $role,
@@ -327,12 +250,10 @@ branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
-  --arg agyhome "${ah:+${ah##*/}}${cdx:+codex}" --arg bucket "${bucket:-}" --argjson agyhomes "${agyhomes:-[]}" \
-  --arg a5 "${cx5:-}$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Five/ { print $3 + 0; exit }' <<< "${usage:-}")" \
-  --arg aw "${cxw:-}$([ -n "$agy" ] && awk -F'\t' -v b="${bucket:-}" '$1 == b && $2 ~ /^Weekly/ { print $3 + 0; exit }' <<< "${usage:-}")" \
-  --argjson isagy "$([ -n "$agy$cdx" ] && echo 1 || echo 0)" \
+  --arg qhome "${cdx:+codex}" --arg bucket "${bucket:-}" --arg a5 "${cx5:-}" --arg aw "${cxw:-}" \
+  --argjson hasq "$([ -n "$cdx" ] && echo 1 || echo 0)" \
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
-  + (if $isagy == 1 then {agy: {home: $agyhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null), homes: $agyhomes}} else {} end)' \
+  + (if $hasq == 1 then {quota: {home: $qhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null)}} else {} end)' \
   > "$log.meta"
 # The pane polls live/ (one empty marker per running worker), not the whole run dir.
 live="$logdir/live/${log##*/}"; mkdir -p "$logdir/live"; : > "$live"
@@ -371,44 +292,7 @@ ev='fromjson? |
     cin:.usage.cache_read_input_tokens,nin:((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
     win:([.modelUsage[]?.contextWindow // empty] | max)}
   else empty end | .t=(now*1000|floor)'
-if [ -n "$agy" ]; then
-  # agy stream-json -> the same compact events, and its result -> a Claude-shaped .json so everything below works unchanged.
-  agyev='fromjson? |
-    if .event=="init" then {e:"init", sid:.conversation_id}
-    elif .event=="step_update" then .step_update |
-      if .step_type=="tool" then
-        if .state=="ACTIVE" then {e:"tool",tool:.tool_name,
-          arg:((.tool_info.parameters // {} | .AbsolutePath // .SearchPath // .DirectoryPath // .SearchDirectory // .Query // .Pattern // "")|tostring|.[0:120])}
-        elif .state=="DONE" then {e:"ok"} elif .state=="ERROR" then {e:"error"} else empty end
-      elif .step_type=="agent_response" and .state=="DONE" then {e:"text",ctx:((.usage.input_tokens // 0) + (.usage.cache_read_tokens // 0))}
-      else empty end
-    elif .event=="result" then .result | {e:"result",ok:(.status=="SUCCESS" and (.response // "") != ""),sub:(.status|ascii_downcase),
-      sid:.conversation_id,turns:.num_turns,denied:(.denied_actions // [] | length),out:.usage.output_tokens,
-      cin:.usage.cache_read_tokens,nin:((.usage.input_tokens // 0))}
-    else empty end | .t=(now*1000|floor)'
-  where="Workspace: $dir"; [ ${#adddirs[@]} -gt 0 ] && where+=" (also readable: $(printf '%s ' "${adddirs[@]}" | sed 's/--add-dir //g'))"
-  # Deny rules match the command text, so `git -C . commit` or `python -c "os.system('git push')"` slip past them.
-  # This git config, inherited by every process the worker starts, sends any push to a dead URL and leaves git no
-  # identity, so commit, merge, rebase, cherry-pick, revert, am and stash fail. Reads and fetch still work.
-  (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL -u EMAIL \
-    HOME="$ah" SHELL="$(command -v bash)" GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.cw-no-push://.pushInsteadOf GIT_CONFIG_VALUE_0= \
-    GIT_CONFIG_KEY_1=user.useConfigOnly GIT_CONFIG_VALUE_1=true GIT_CONFIG_KEY_2=user.name GIT_CONFIG_VALUE_2= agy -p "$where."$'\n\n'"$task" --agent "$aname" --model "$agy" \
-    --dangerously-skip-permissions --output-format stream-json "${adddirs[@]+"${adddirs[@]}"}" ${resume:+--conversation "$resume"}) 2> "$log.err" \
-    | tee "$log.jsonl" | jq -Rc --unbuffered "$agyev" > "$log.events" 2>/dev/null
-  rc=${PIPESTATUS[0]}
-  [ "$rc" = 3 ] && rc=1   # agy model error; in cw rc 3 means QUESTION
-  # agy counts one turn per prompt; count model responses so turns compare with Claude runs.
-  aturns=$(jq -Rn '[inputs | fromjson? | select(.event=="step_update" and .step_update.step_type=="agent_response" and .step_update.state=="DONE")] | length' "$log.jsonl")
-  jq -c --argjson n "$aturns" 'if .e=="result" then .turns=$n else . end' "$log.events" > "$log.events.tmp" && mv "$log.events.tmp" "$log.events"
-  jq -Rc --arg m "$model" --argjson n "$aturns" 'fromjson? | select(.event=="result") | .result | ((.response // "") == "") as $empty
-    | {type:"result", is_error:(.status != "SUCCESS" or $empty),
-       subtype:(if .status != "SUCCESS" then (.status|ascii_downcase) elif $empty then "empty_response" else "success" end),
-       result:(.response // ""), session_id:.conversation_id, num_turns:$n,
-       usage:{input_tokens:((.usage.input_tokens // 0)), cache_creation_input_tokens:0,
-         cache_read_input_tokens:(.usage.cache_read_tokens // 0), output_tokens:(.usage.output_tokens // 0)},
-       modelUsage:{($m):{}}, permission_denials:(.denied_actions // [] | map({tool_name:.action, tool_input:{display:.display_name}}))}' \
-    "$log.jsonl" | tail -1 > "$log.json"
-elif [ -n "$cdx" ]; then
+if [ -n "$cdx" ]; then
   # The lean start: 3.6k input tokens against 27k for a plain `codex exec`. agents.enabled is the switch that removes
   # the multi-agent tools and text; --disable multi_agent does not. Ignoring the user config also drops MCP and plugins.
   printf '%s\n' "$sp" > "$log.sp"
@@ -483,7 +367,6 @@ rc=${PIPESTATUS[1]}
 jq -Rc 'fromjson? | select(.type=="result")' "$log.jsonl" | tail -1 > "$log.json"
 fi
 sid=$(jq -r '.session_id // empty' "$log.json" 2>/dev/null); [ -n "$sid" ] && printf '%s\n' "$dir" > "$logdir/dirs/$sid"
-[ -n "$sid" ] && [ -n "$agy" ] && printf '%s\n' "$ah" > "$logdir/dirs/$sid.agy"   # its conversation lives in that home
 [ -n "$sid" ] && [ -n "$cdx" ] && printf '%s\n' "$cdx" > "$logdir/dirs/$sid.codex"   # a resume stays on Codex, same model
 # Lines this run changed (untracked files included), for the crew pane.
 tree1=$(snap)
@@ -491,19 +374,13 @@ if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
   git -C "$dir" diff --numstat "$tree0" "$tree1" 2>/dev/null | awk -v t="$(( $(date +%s) * 1000 ))" \
     '{a+=$1; d+=$2; n++} END {printf "{\"e\":\"diff\",\"add\":%d,\"del\":%d,\"files\":%d,\"t\":%s}\n", a, d, n, t}' >> "$log.events"
 fi
-# agy ran out of quota mid-run and changed nothing: run the same task again, agy tiers off (Claude fallback).
-if [ -n "$agy" ] && [ -n "$tree0" ] && [ "$tree1" = "$tree0" ] && grep -q RESOURCE_EXHAUSTED "$log.err" 2>/dev/null; then
-  echo "$rc" > "$log.done"; rm -f "$live"
-  echo "cw: agy quota ran out mid-run (no file changes); rerunning on Claude" >&2
-  CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
-fi
 # Codex hit a limit or a full context with no work to keep: run the same task on Claude. A coder that changed files
 # stops here, so the lead can hand that tree to a fresh Claude worker.
 case $([ -n "$cdx" ] && jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit)
   if [ -z "$resume" ] && { [ "$role" != coder ] || { [ -n "$tree0" ] && [ "$tree1" = "$tree0" ]; }; }; then
     echo "$rc" > "$log.done"; rm -f "$live" "$logdir/dirs/.codex-limits"
     echo "cw: codex stopped ($(jq -r .subtype "$log.json")), no file changes; rerunning on Claude" >&2
-    CW_CODEX=0 CW_AGY=0 exec "$0" "${argv[@]}" <<< "$spec"
+    CW_CODEX=0 exec "$0" "${argv[@]}" <<< "$spec"
   fi ;;
 esac
 # Turn limit: resume the same session with a standard message instead of making the lead do it.

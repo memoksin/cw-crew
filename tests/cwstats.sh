@@ -56,14 +56,6 @@ printf '{"subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":0.1
 printf '{"e":"init","t":%d}\n{"e":"result","ok":true,"t":%d}\n' "$((recent*1000))" "$((recent*1000+30000))" > "$logdir/$b.events"
 printf '0\n' > "$logdir/$b.done"
 
-# Run 6: agy run with md link and outside read
-b=20261029-100600-scout-1007
-printf '{"role":"scout","model":"agy/gemini-3.8-flash-high","session":"sess-F","resume":"","task":"Find all callers of parseConfig","start":%d,"effort":"low","effort_src":"default","maxt":40,"cont":false}\n' "$recent" > "$logdir/$b.meta"
-printf '{"subtype":"success","is_error":false,"num_turns":3,"session_id":"sid-1007","result":"Found callers:\\n- [main.ts](file:///work/src/main.ts#L42)\\n- [app.ts](file:///work/src/app.ts#L10)"}\n' > "$logdir/$b.json"
-printf '{"e":"init","t":%d}\n{"e":"tool","tool":"Read","arg":"/work/src/parser.ts","t":%d}\n{"e":"tool","tool":"Read","arg":"/outside/other/file.ts","t":%d}\n{"e":"error","t":%d}\n{"e":"result","ok":true,"t":%d}\n' "$((recent*1000))" "$((recent*1000+1000))" "$((recent*1000+2000))" "$((recent*1000+2500))" "$((recent*1000+5000))" > "$logdir/$b.events"
-printf '0\n' > "$logdir/$b.done"
-printf '/work\n' > "$logdir/dirs/sid-1007"
-
 # Run 7: a run with .ask
 b=20261029-100700-coder-1008
 printf '{"role":"coder","model":"claude-sonnet-5-5","session":"sess-G","resume":"","task":"Deploy to staging","start":%d,"effort":"medium","effort_src":"default","maxt":80,"cont":false}\n' "$recent" > "$logdir/$b.meta"
@@ -102,16 +94,14 @@ check "old run excluded" '! echo "$out" | grep -q "Ancient"'
 check "table 2 header" 'echo "$out" | grep -q "^Jev effort"'
 check "table 2 sure high 2 runs" 'echo "$out" | grep "^sure high" | grep -qE "[[:space:]]2[[:space:]]"'
 check "table 2 stepped down 1 run" 'echo "$out" | grep "^stepped down" | grep -qE "[[:space:]]1[[:space:]]"'
-check "table 3 header" 'echo "$out" | grep -q "^agy prompt signals"'
-check "table 3 agy model listed" 'echo "$out" | grep -q "^agy/gemini-3.8-flash-high"'
 
 # ──── export checks (exact numbers) ────
 ejson=$(bash "$here/bin/cwstats" --days 1 --export)
 check "export is valid JSON" 'echo "$ejson" | jq -e . >/dev/null'
 check "export schema=1, days=1" 'echo "$ejson" | jq -e ".schema == 1 and .days == 1" >/dev/null'
-check "export has 3 tables" 'echo "$ejson" | jq -e ".tables | keys | length == 3" >/dev/null'
+check "export has 2 tables" 'echo "$ejson" | jq -e ".tables | keys | length == 2" >/dev/null'
 t1='.tables.by_role_model_effort[]'
-check "total runs 8 (old run excluded)" 'echo "$ejson" | jq -e "[$t1.runs] | add == 8" >/dev/null'
+check "total runs 7 (old run excluded)" 'echo "$ejson" | jq -e "[$t1.runs] | add == 7" >/dev/null'
 sm="$t1 | select(.model==\"claude-sonnet-5-5\" and .effort==\"medium\")"
 check "sonnet medium: runs 5" 'echo "$ejson" | jq -e "$sm | .runs == 5" >/dev/null'
 check "sonnet medium: max_turns 1" 'echo "$ejson" | jq -e "$sm | .max_turns == 1" >/dev/null'
@@ -126,11 +116,6 @@ check "jev: sure high 2" 'echo "$ejson" | jq -e "$jr | select(.label==\"sure hig
 check "jev: stepped down 1" 'echo "$ejson" | jq -e "$jr | select(.label==\"stepped down\") | .runs == 1" >/dev/null'
 check "jev: medium 2 (one escalated)" 'echo "$ejson" | jq -e "$jr | select(.label==\"medium\") | .runs == 2 and .escalated_pct == 50" >/dev/null'
 check "jev: low 0" 'echo "$ejson" | jq -e "$jr | select(.label==\"low\") | .runs == 0" >/dev/null'
-ag='.tables.agy_signals[] | select(.model=="agy/gemini-3.8-flash-high")'
-check "agy: 1 run, 0 empty" 'echo "$ejson" | jq -e "$ag | .runs == 1 and .empty == 0" >/dev/null'
-check "agy: md_links 1" 'echo "$ejson" | jq -e "$ag | .md_links == 1" >/dev/null'
-check "agy: outside_reads 1" 'echo "$ejson" | jq -e "$ag | .outside_reads == 1" >/dev/null'
-check "agy: 1 tool error per run" 'echo "$ejson" | jq -e "$ag | .tool_errs_mean == 1" >/dev/null'
 check "export has no task text" '! echo "$ejson" | grep -qiE "parser|login|config|staging|deploy|callers|refactor|pipeline"'
 check "export has no paths" '! echo "$ejson" | grep -qE "/work|/outside|file://"'
 check "export has no session ids or names" '! echo "$ejson" | grep -qE "sess-|sid-|coder-100"'

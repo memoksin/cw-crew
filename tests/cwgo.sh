@@ -16,7 +16,7 @@ echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
 printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}\n' "$txt"
 EOF2
 chmod +x "$t/bin/claude"
-export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_AGY=0 CW_FLEET=$t/fleet
+export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_CODEX=0 CW_FLEET=$t/fleet
 unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_APPLY_LINES
 fails=0
 ok() { echo "ok   $1"; }

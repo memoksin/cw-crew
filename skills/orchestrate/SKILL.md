@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Opus orchestrates lean headless workers to save Claude limits. Scouts read, gather context, research and report; coders write code; a fresh reviewer checks risky diffs. With CW_AGY=1, tiers spend Google AI quota first (Gemini Flash, Claude 4.6 on the Antigravity CLI) and Claude Sonnet/Opus 5.5 last. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
+description: Opus orchestrates lean headless workers to save Claude limits. Scouts read, gather context, research and report; coders write code; a fresh reviewer checks risky diffs. With CW_CODEX=1, tiers spend the ChatGPT plan first and Claude Sonnet/Opus 5.5 last. Use for any multi-file reading, research or implementation work. Trigger on /orchestrate, "delegate", "use workers", "let Haiku/Sonnet do it".
 ---
 
 # Orchestrate headless workers
@@ -11,15 +11,15 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 
 | Role | Tools | Use for |
 |---|---|---|
-| `scout` | read-only (Claude: Read + read-only Bash; agy: view_file, grep_search, find_by_name, list_dir); `-w` adds WebFetch/WebSearch (Claude only) | find files and call sites, summarize code/docs, web research, logs, reports |
+| `scout` | read-only (Read + read-only Bash); `-w` adds WebFetch/WebSearch | find files and call sites, summarize code/docs, web research, logs, reports |
 | `coder` | read, edit, write, shell; commit/push/reset/clean blocked | implement a spec, run its tests |
 | `reviewer` | Read, read-only Bash; no web, no edits. cw inlines the diff | second pair of eyes on a finished diff, fresh context |
 
-Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on its own model unless `-M` names a tier (`-M flash`: see Reviewer).
+Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on its own model unless `-M` names a tier.
 
 ## Codex tiers (`CW_CODEX=1`): spend the ChatGPT plan first
 
-Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, coders and reviewers to `sol`, and these win over agy tiers. Pass `-M haiku|sonnet|opus` to stay on Claude.
+Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, coders and reviewers to `sol`. Pass `-M haiku|sonnet|opus` to stay on Claude.
 
 | `-M` | Model | Window | Use | Fallback |
 |---|---|---|---|---|
@@ -34,28 +34,19 @@ Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, cod
 - Reads are open disk-wide except `CW_CODEX_DENY` and `CW_CODEX_DENY_GLOBS`. Tasks and the files workers read go to OpenAI.
 - No turn limit on Codex: only `-t` stops a loop. No image reading: visual review stays on Claude.
 
-## Tiers (`-M`): spend Google quota first, Claude last
+## Claude tiers (`-M`)
 
-Pick the lowest tier likely to get it right on the first try. agy tiers run on the Antigravity CLI (Google AI plan); they do not touch Claude limits.
+Pick the lowest tier likely to get it right on the first try.
 
-Tier 1 is opt-in: it needs `CW_AGY=1` in the user's env. Check once per session: `echo ${CW_AGY:-0}`. Off: use only `haiku`, `sonnet`, `opus` and skip the agy rules below; scouts default to `haiku`.
+| Tier | `-M` | Scout | Coder |
+|---|---|---|---|
+| 1 | `haiku` (Haiku 5.5) | default: lookups, call sites, file:line answers, web research (`-w`) | — |
+| 2 | `sonnet` (Sonnet 5.5) | reading that needs judgement, a retry after a weak haiku report | default: features, bugs, refactors, tasks needing `-a` |
+| 3 | `opus` (Opus 5.5) | — | rare: see Opus coder below |
 
-| Tier | `-M` | Quota | Scout | Coder |
-|---|---|---|---|---|
-| 1 | `flash` (Gemini 3.8 Flash) | agy Gemini | default: lookups, call sites, file:line answers | trivial: 1 file, a few lines, exact spec, a given check |
-| 2 | `sonnet` (Sonnet 5.5); scouts: `haiku` | Claude | `haiku`: web research (`-w`), reading that needs judgement, a retry after a weak flash report | everything above trivial: features, bugs, refactors, a retry after a flash failure, tasks needing `-a` |
-| 3 | `opus` (Opus 5.5) | Claude | — | rare: see Opus coder below |
-
-- agy also serves Claude models, but cw does not offer them: that quota bucket is tiny (two Opus 4.6 coder runs used a whole 5-hour window and half the week on a Pro plan). Gemini quota is far larger.
-- Explore mode: when `CW_AGY_EXPLORE` holds a date (YYYY-MM-DD) that is today or later, the user is tuning Gemini prompts. Keep every task on the tier it needs (quality first), and add flash work next to it: a self-contained slice of a sonnet job (a helper, a test, a lookup the spec needs), or now and then a slightly bigger task to probe what flash can do. Use real work only, no made-up tasks. After you check each flash report, record it: `cwmark NAME ok|bad "why"`.
-
-- Defaults: scout `flash` with `CW_AGY=1` (`haiku` with `-w` or when off), coder `sonnet`. Always pass `-M` for coders.
+- Defaults: scout `haiku` (`luna` with `CW_CODEX=1`), coder `sonnet`. Always pass `-M` for coders.
 - Do not hold back tiers 2-3 when the task needs them: a failed cheap run plus a retry costs more than one right run.
-- Failed or weak result on an agy tier: rerun one tier up with what went wrong. An agy session resumes (`-r`) only on agy.
-- Keep agy jobs small: every turn resends the whole context, so a long run costs far more than its window use shows (the Gemini window is 1M; one 97-turn run read 10M cached tokens). Split a job that needs more than ~40 turns or ~100k context.
-- cw falls back to the role's Claude model (scout `haiku`, coder `sonnet`) on its own when agy is missing, the run uses `-w` or `-a`, or no agy home (one per Google account, `CW_AGY_HOME`) has quota at or above `CW_AGY_MIN` % (default 5). Homes are tried in order. The note `cw: ..., using <model>` goes to stderr. Quota of every home: `cwagy`.
-- agy coder safety is weaker than Claude's auto mode: deny rules match the command text (cw's ask rules are denied there too), and git push/commit are blocked by env. A `git reset --hard` or `rm` in another syntax can still run. Give agy coders small, git-free tasks; on an important repo use `-W`. They cannot get `-a` grants: a PERMISSION from an agy coder means rerun on `sonnet` with `-a`.
-- agy scouts can read files outside the repo (the prompt pins them to it). Tasks and the files they read go to Google.
+- Failed or weak result: rerun one tier up with what went wrong.
 
 ### Opus coder (rare, expensive)
 
@@ -68,7 +59,7 @@ Everything else stays Sonnet: verifiable features, test-backed fixes, UI/2D work
 
 ## The loop
 
-1. Scout (default `flash`) investigates **before** the work: finds files and call sites, reads code and docs, researches, reports facts.
+1. Scout (default `haiku`) investigates **before** the work: finds files and call sites, reads code and docs, researches, reports facts.
 2. Lead writes the spec from that report.
 3. Coder (tier by task size, see Tiers) does the work.
 4. Reviewer (Sonnet, read-only) reads the diff with a clean context, only when "Reviewer" below says so.
@@ -86,7 +77,7 @@ cw scout|coder|reviewer [-M tier] [-C dir] [-W name] [-B ref] [-r sid] [-t sec] 
 - Report → stdout. Meta → stderr: `[cw role model rc subtype sid turns new_in cache_r out denied secs accept=… log=…]`.
 - `-f file` (repeatable) inlines the file into the prompt. Use it whenever you already know which files matter.
 - `-T 'cmd'`: cw runs the acceptance command itself in the worker's dir after a clean finish. The meta line shows `accept=pass`, `accept=FAIL(rc=N)` or `accept=FAIL(output)` (exit 0 but a `FAIL`/`SCRIPT ERROR` line; Godot exits 0 on a failed test; `CW_ACCEPT_FAIL_RE` overrides the pattern, empty turns it off), and on failure the report ends with the last 20 lines. Always pass it when the spec has acceptance commands, so you do not rerun them by hand just to learn pass/fail.
-- `-S schema.json` (scout, coder): the report is checked against a JSON Schema (`claude --json-schema`). Meta line shows `schema=pass` and the compact `structured_output` JSON is the last stdout line; `schema=FAIL` turns an rc-0 run into rc 1. A missing or invalid file exits 2 before any model call. Claude tiers only (agy falls back). Not persisted: pass it again on `-r`.
+- `-S schema.json` (scout, coder): the report is checked against a JSON Schema (`claude --json-schema`). Meta line shows `schema=pass` and the compact `structured_output` JSON is the last stdout line; `schema=FAIL` turns an rc-0 run into rc 1. A missing or invalid file exits 2 before any model call. Claude and Codex tiers. Not persisted: pass it again on `-r`.
 - Turn limit (`CW_MAX_TURNS`, coder default 80; use 150 for big tasks): cw resumes the same session once with a "continue" message (`CW_AUTO_CONTINUE`, default 1), but only if that run changed files and under half of its tool calls failed. A worker that loops stops with `error_max_turns`: read why before resuming it, never resume blindly.
 - `-D dir` (repeatable): extra dir the worker may read, e.g. screenshots under `/tmp` for a scout review. Without it, reads outside the work dir are denied.
 - Fix-up → `-r <sid>` (scout or coder). The worker keeps its context and runs in the session's own dir. It is not cheap: see "Resume cost".
@@ -139,7 +130,6 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 - `SUGGEST` → take what is cheap and right, drop the rest. `UNSURE` → check it yourself before acting.
 - Cost: one reviewer per diff, ~3k cold start plus the diff, usually under 5 turns (limit 20). Never resume a reviewer for a new diff: a fresh one is cheaper and keeps its context clean. Default effort `low`; `-e medium` for security or data-loss risk.
 - Haiku (`CW_REVIEWER_MODEL=claude-haiku-5-5`) only for mechanical checks against an explicit list.
-- `-M flash` runs the reviewer on Gemini (agy) with read-only tools; in explore mode (`CW_AGY_EXPLORE`), run it as a shadow next to the Sonnet reviewer on the same diff, act only on the Sonnet verdict, and `cwmark` the flash review (ok = same blockers or a real extra one; bad = a missed blocker or a false blocker).
 
 ## Cost model (measured)
 
@@ -173,7 +163,7 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 
 ## Effort
 
-- Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README; `high` only when Jev is sure, `CW_JEV_SURE`; agy tiers skip it). A resume keeps the effort of the run it continues.
+- Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README; `high` only when Jev is sure, `CW_JEV_SURE`). A resume keeps the effort of the run it continues.
 - Override with `-e low|medium|high` only for a known reason: a fix-up after a failed attempt → `-e high`.
 - Never xhigh/max for workers: work that needs it, Opus does itself.
 
