@@ -86,7 +86,7 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_REVIEW_MAX` | 60000 | characters of diff a reviewer gets inline; the rest it reads itself |
 | `CW_LOG_DIR` | `~/.claude/cw-runs` | run logs (the pane reads them too); runs older than 2 days move to `$CW_LOG_DIR-archive` |
 | `CW_FLEET` | `$CW_LOG_DIR/fleet/<repo>` | fleet dir |
-| `CW_WT_ROOT` | `../<repo>-wt` | worktree root |
+| `CW_WT_ROOT` | `<repo>/.crew` | worktree root; default adds `/.crew/` to the repo's `.gitignore` |
 | `CW_JEV` | 0 | `1` = Jev (OpenRouter) picks worker effort per task. **Sends the first 20k characters of each task to OpenRouter.** Off: role default (scout low, coder medium) |
 | `CW_JEV_SURE` | 70 | Jev probability (%) needed to pick `high`; a less sure `high` runs at `medium` |
 | `OPENROUTER_API_KEY` / `CW_JEV_KEYCHAIN` | — | key for `CW_JEV=1`; on macOS a keychain service name works instead of the env key |
@@ -103,6 +103,7 @@ claude --plugin-dir .          # run from this folder
 claude plugin validate .
 claude plugin test .
 tests/cw.sh                    # bin/cw against a fake claude (no model call)
+bash tests/cwwt.sh              # worktree lifecycle in a disposable repo
 tools/gen_frames.sh            # rebuild frames/ after changing hooks/creatures.ts (needs bun + Pillow)
 ```
 

@@ -6,7 +6,7 @@
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
-#   -W name: run in a git worktree outside the repo (cwwt create name; reused if it exists). -K: extra ignored path to clone
+#   -W name: run in a git worktree in <repo>/.crew (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
 #   -M tier: luna|sol|astra (Codex, ChatGPT plan quota) or haiku|sonnet|opus (Claude). See the tier block.
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).

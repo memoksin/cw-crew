@@ -217,7 +217,7 @@ The lead's own work (shared helpers, specs, merges) goes on between notification
 
 - Never two writers on the same files. In one tree: parallel writers only on disjoint files, max 2. Scouts can run in parallel.
 - More writers → one worktree per writer: `cw coder -W <name> ...` (any git repo). `cwwt` does the chores, so the lead does not:
-  - Creates `../<repo>-wt/<name>` on branch `wt/<name>` from HEAD, plus the main tree's uncommitted and untracked files, so the worker sees what the lead sees. Reuses the worktree if it exists.
+  - Creates `<repo>/.crew/<name>` on branch `wt/<name>` from HEAD, plus the main tree's uncommitted and untracked files, so the worker sees what the lead sees. Adds `/.crew/` to the repo's `.gitignore` before creation. Reuses the worktree if it exists. `CW_WT_ROOT` overrides the location; existing worktrees at the old location are not moved (use `CW_WT_ROOT` to access them).
   - Clones the git-ignored paths the project needs to build and test: those listed in `<repo>/.cw-copy` (one per line; e.g. `.godot`, `node_modules`, ignored assets), plus `-K <path>` per run. On APFS the clone is instant (copy-on-write). Add a `.cw-copy` to a repo the first time a worker's tests there fail for lack of ignored files.
   - `-r <sid>` returns to the dir the session ran in, so there is no need to repeat `-W` or `-C`.
   - Merge: `cwwt diff <name> [--stat]` shows the worker's changes only. `cwwt apply <name>` applies them to the main tree. On a conflict it changes nothing and keeps the patch. `cwwt rm <name>` cleans up. Run from the repo.
