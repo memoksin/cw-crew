@@ -18,6 +18,35 @@ const statOf = (files: Record<string, string>, mtime: (name: string) => number =
   return (name in files ? { value: { kind: 'file', size: files[name]!.length, mtimeMs: mtime(name), isLink: false } } : { deny: `no ${name}` }) as never
 }
 
+test('first sight announces recent completions and failed tests, but not old runs', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const files: Record<string, string> = {}
+  for (const [id, name, age, failed] of [['a', 'recent', 1000, false], ['b', 'old', 20_000, false], ['c', 'tested', 1000, true]] as const) {
+    files[`${id}.meta`] = meta(name)
+    files[`${id}.done`] = '0'
+    files[`${id}.events`] = JSON.stringify({ e: 'result', ok: true, t: NOW - age }) + '\n'
+      + (failed ? JSON.stringify({ e: 'accept_end', ok: false, rc: 1, t: NOW - age }) + '\n' : '')
+  }
+  on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(files))
+  on('fs.read', async (_$, e) => {
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  const toasts: string[] = []
+  on('ui.toast', async (_$, e) => { toasts.push(e.text); return { value: undefined } as never })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.status', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  expect(toasts).toEqual(['✓ recent (coder) done', '✗ tested (coder) failed its test'])
+  await clock.advance(500)
+  expect(toasts.length).toBe(2)
+})
+
 for (const surface of ['terminal', 'desktop'] as const) test(`${surface}: the crew pane draws cards with a details button, opens the detail view and goes back`, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })

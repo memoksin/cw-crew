@@ -257,6 +257,24 @@ test('the acceptance run after the result shows as testing, then done or failed'
   expect(frameCount('test')).toBe(32)
 })
 
+test('a successful result waits for cw to finish or start its acceptance command', () => {
+  const t = T0 * 1000 + 900
+  const run: Run = { id: 'finish', meta: meta(), events: [{ e: 'result', ok: true, t }] }
+  const pending = runState({ ...run, meta: meta({ accept: true }) }, t + 5000)
+  expect(pending.state).toBe('test')
+  expect(pending.stateAt).toBe(t)
+  expect(pending.end).toBeUndefined()
+  const finishing = runState(run, t + 5000)
+  expect(finishing.state).toBe('think')
+  expect(finishing.end).toBeUndefined()
+  expect(runState(run, t + 40_000)).toMatchObject({ state: 'done', end: t })
+  for (const accept of [undefined, true]) {
+    expect(runState({ ...run, meta: meta({ accept }), rc: 0 }, t + 5000)).toMatchObject({ state: 'done', end: t })
+  }
+  expect(runState({ ...run, meta: meta({ accept: true }) }, t + 1_830_000)).toMatchObject({ state: 'done', end: t })
+  expect(runState({ ...run, meta: meta({ accept: true }), events: [{ e: 'result', ok: false, t }] }, t + 5000).state).toBe('failed')
+})
+
 test('motion is gentle: a loop frame moves few pixels from the one before it', async () => {
   for (const state of ['think', 'read', 'write', 'bash', 'web', 'test', 'ask', 'sleep'] as const) {
     let worst = 0

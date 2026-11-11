@@ -21,6 +21,7 @@ export type Meta = {
   name?: string   // fleet name from cwgo (CW_NAME): shown instead of a generated one
   effort_p?: string; maxt?: number; branch?: string; wt?: string
   cont?: boolean  // an auto-continue after the turn limit
+  accept?: boolean
   quota?: QuotaMeta   // the quota read before the run
 }
 // Percent remaining; null when the usage line was missing.
@@ -105,8 +106,12 @@ export function runState(run: Run, now: number): RunView {
   // cw auto-continues a turn-limited run without writing .done: that result is not the end
   const continuing = result?.sub === 'error_max_turns' && run.rc === undefined
   // cw runs the acceptance command after the result and writes .done only when it ends
-  if (accept && !accepted && run.rc === undefined && now - accept.t < ACCEPT_MS) {
-    return { ...base, state: 'test', stateAt: accept.t }
+  const acceptAt = accept?.t ?? (result?.ok && !continuing && run.meta.accept ? result.t : undefined)
+  if (acceptAt !== undefined && !accepted && run.rc === undefined && now - acceptAt < ACCEPT_MS) {
+    return { ...base, state: 'test', stateAt: acceptAt }
+  }
+  if (result?.ok && !continuing && run.rc === undefined && run.meta.accept !== true && !accept && now - result.t < 30_000) {
+    return { ...base, state: 'think', stateAt: result.t }
   }
   if ((result && !continuing) || run.rc !== undefined) {
     const end = accepted?.t ?? result?.t ?? run.doneAt ?? now

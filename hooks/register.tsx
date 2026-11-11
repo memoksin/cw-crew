@@ -123,7 +123,7 @@ async function poll($: EngineInterface) {
     }
 
     const all = buildWorkers([...runs.values()], now)
-    announce($, all)
+    announce($, all, now)
     const spent = all.reduce((s, w) => s + (w.cost ?? 0), 0)
     // Workers draw on the same account: the 5-hour window moved by this much since the session began,
     // and the crew's part of it is taken as its part of the money spent.
@@ -240,16 +240,16 @@ async function svgOf($: EngineInterface, draw: (images: boolean) => { rows: numb
 // Ask for the rows the scene needs (room for two workers once any run), not the default third of the screen.
 const paneArgs = () => ({ id: PANE, title: 'Crew', rows: sceneRows(workers.length && Math.max(2, workers.length), 60), columns: 60 })
 
-function announce($: EngineInterface, all: Worker[]) {
+function announce($: EngineInterface, all: Worker[], now: number) {
   // One state per key (the last run wins): two entries with one key would flip-flop and toast every poll.
   for (const w of new Map(all.map(w => [w.key, w])).values()) {
     const before = seen.get(w.key)
     seen.set(w.key, w.state)
-    if (before === w.state || (before === undefined && w.end !== undefined)) continue
+    if (before === w.state || (before === undefined && w.end !== undefined && now - w.end > 15_000)) continue
     if (w.state === 'ask') $.ui.toast(`? ${w.name} asks: ${w.question ?? ''}`, { timeoutMs: 8000 })
     else if (w.state === 'blocked') $.ui.toast(`! ${w.name} blocked: ${w.arg}`)
     else if (w.state === 'done') $.ui.toast(`✓ ${w.name} (${w.role}) done`)
-    else if (w.state === 'failed') $.ui.toast(`✗ ${w.name} (${w.role}) failed`)
+    else if (w.state === 'failed') $.ui.toast(`✗ ${w.name} (${w.role}) failed${w.accept?.ok === false ? ' its test' : ''}`)
   }
 }
 
