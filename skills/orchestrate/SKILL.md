@@ -17,6 +17,18 @@ Opus = lead. Plans, writes task specs, runs workers, verifies, asks for fixes, i
 
 Override Claude models: `CW_SCOUT_MODEL`, `CW_CODER_MODEL`, `CW_REVIEWER_MODEL`. Defaults are pinned full IDs (`claude-haiku-5-5`, `claude-sonnet-5-5`). The reviewer stays on its own model unless `-M` names a tier.
 
+## Provider priority (`CW_PRIORITY`)
+
+Check once per session: `[ -n "${CW_PRIORITY:-}" ] && echo set`. When set, cw picks the provider; the lead picks only the level with `-M`:
+
+| Level | Names |
+|---|---|
+| 1 | `haiku` / `luna` |
+| 2 | `sonnet` / `sol` |
+| 3 | `opus` / `astra` |
+
+Never choose or avoid a provider to save a limit; limits are spent in order until empty. Use `-P provider` only for a technical need (images or visual review → `claude` or `api`; network or `-a` → not `codex`) and tell the user why. When a provider runs dry, cw moves on by itself. A Codex coder with file changes stops: hand its tree to a fresh worker.
+
 ## Codex tiers (`CW_CODEX=1`): spend the ChatGPT plan first
 
 Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, coders and reviewers to `sol`. Pass `-M haiku|sonnet|opus` to stay on Claude.
@@ -28,6 +40,7 @@ Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, cod
 | `astra` | GPT-6 Astra | 258k | rare; about 5x Sol. Only for a task Sol failed twice | Opus for coders |
 
 - Limits: `cwcodex` prints percent used (5h, week) with no model call. A run falls back to Claude at `CW_CODEX_MAX` (default 90).
+- With `CW_PRIORITY` set, its list replaces `CW_CODEX` and the 90% rule.
 - Limit or full context mid-run with no file changes: cw reruns on Claude. A coder with file changes stops with `usage_limit` or `context_limit`: give that tree to a fresh Sonnet worker. Check every `-T` result yourself.
 - Needs more than the window (huge logs, a whole-repo read): use a Claude tier (1M).
 - Sandbox: coders write only in the work dir. Network, `.git` and other processes are blocked, and a blocked call cannot be approved, so a coder that needs the network or `-a` goes to `sonnet`. `rm -rf` inside the work dir is not blocked: use `-W` on an important repo.

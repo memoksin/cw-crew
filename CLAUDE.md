@@ -20,6 +20,7 @@ Claude Code plugin: `orchestrate` skill + `cw` worker CLI + crew pane (hooks mod
 
 ## Rules
 
+- Providers are codex, api, claude; order comes from `CW_PRIORITY`, selection lives in `bin/cw`; the API key never reaches logs.
 - No user-specific paths or names. Personal setup goes through env (`CW_*`), documented in README's table.
 - Nothing leaves the machine by default. Jev (OpenRouter) stays opt-in via `CW_JEV=1`, Codex tiers (OpenAI) via `CW_CODEX=1`.
 - `cw` and `cwwait` bodies stay inside one `{ }` block: editing them must not break running workers.

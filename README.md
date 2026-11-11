@@ -59,6 +59,7 @@ Ask Claude to delegate ("use workers", `/orchestrate`). By hand:
 
 ```sh
 cw scout -f src/app.ts <<< "List every caller of parseConfig with file:line."
+cw coder -P api <<< "Use the API provider for this run."
 cwgo api coder -W api -T 'npm test' -- specs/common.md specs/api.md
 #   run cwgo in the background: it waits for its worker and prints the report or question
 cwwait   # recovery: fires when any unreported worker finishes (use with cwgo -d)
@@ -77,6 +78,10 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_SCOUT_MODEL` / `CW_CODER_MODEL` / `CW_REVIEWER_MODEL` | `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5` | worker models |
 | `CW_CODEX` | 0 | `1` = Codex tiers `luna`, `sol`, `astra` on; scouts default to `luna`, coders and reviewers to `sol`. **Tasks and the files workers read go to OpenAI** |
 | `CW_CODEX_MAX` | 90 | percent used (5h or weekly) at which a run falls back to Claude; 100 means use Codex until the limit is fully spent |
+| `CW_PRIORITY` | — | colon-separated provider order, e.g. `codex:api:claude`; cw uses the first available provider |
+| `CW_API_KEY` | — | Anthropic API key for the `api` provider; billed per token |
+| `CW_API_KEYCHAIN` | — | macOS keychain item name to read the API key from (like `CW_JEV_KEYCHAIN`) |
+| `CW_API_RETRY` | 3600 | seconds before retrying an API provider marked spent |
 | `CW_CODEX_TTL` | 60 | seconds one limit reading is reused (macOS; Linux reads every run) |
 | `CW_CODEX_DENY` | `$HOME/` + `.ssh`, `.aws`, `.azure`, `.config/gcloud`, `.gnupg`, `.netrc`, `.config/gh` | colon list of extra absolute paths Codex workers may not read; defaults always apply. Other reads remain open; `.codex` is not denied (auth/runtime) |
 | `CW_CODEX_DENY_GLOBS` | `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/*.p8`, `**/*.p12`, `**/*.pfx`, `**/*.crt`, `**/*.cer`, `**/*.der`, `**/*.jks`, `**/*.keystore`, `**/local.properties` | colon list of extra denied globs under the work dir; defaults always apply, at any depth (including the root) |
@@ -103,6 +108,20 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_ACCEPT_FAIL_RE` | `^\s*(FAIL\b(?!:? *0\b)\|SCRIPT ERROR)` | Perl regex: a `-T` run that exits 0 but prints a matching line is `accept=FAIL(output)`. Empty turns it off |
 
 Set them in `~/.claude/settings.json` under `env`.
+
+### Spend order
+
+Set the order cw should try providers:
+
+```sh
+export CW_PRIORITY=codex:api:claude
+```
+
+cw takes the first available provider in the list.
+Codex uses your ChatGPT plan; `api` bills the Anthropic API key per token.
+`claude` uses your Claude subscription.
+When a provider runs dry, cw moves on to the next one.
+Use `-P provider` only when a technical need requires a specific provider.
 
 ## Develop
 
