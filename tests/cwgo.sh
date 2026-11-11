@@ -8,6 +8,7 @@ cat > "$t/bin/claude" <<'EOF2'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$FAKE/args"; p=$(cat)
 if printf '%s' "$p" | grep -q 'Review against this task spec'; then
+  [ -f "$CW_FLEET/$CW_NAME.pid" ] && kill -0 "$(cat "$CW_FLEET/$CW_NAME.pid")" 2>/dev/null && echo live > "$FAKE/rv.live"
   echo "$*" >> "$FAKE/rv.called"; txt=${RV:-DONE review: clean}
 else
   printf 'one\ntwo\nthree\n' > a.txt; printf 'x\n' > new.txt; txt=DONE
@@ -36,7 +37,11 @@ check "-A without -T exits 2" '[ $? = 2 ] && grep -q "needs role coder" "$t/err"
 check "-A with scout exits 2" '[ $? = 2 ]'
 
 # light diff applies
-out=$("$here/bin/cwgo" -A w coder -W w -T 'grep -q three a.txt' -- "$t/task.md" 2>&1); echo "$out" | grep '^==='
+cat > "$t/env" <<'EOF2'
+trap 'case $BASH_COMMAND in "CW_NAME=\$n nohup "*) [ -f "$fleet/$n.pid" ] && kill -0 "$(cat "$fleet/$n.pid")" 2>/dev/null && echo live > "$FAKE/worker.live" ;; esac' DEBUG
+EOF2
+out=$(BASH_ENV="$t/env" "$here/bin/cwgo" -A w coder -W w -T 'grep -q three a.txt' -- "$t/task.md" 2>&1); echo "$out" | grep '^==='
+check "worker: live pid before err redirect" '[ "$(cat "$t/worker.live")" = live ]'
 check "light: APPLIED, review skipped" 'echo "$out" | grep -q "^=== APPLIED w:.*review=skipped (light)"'
 check "light: main tree has the change, worktree gone" 'grep -q three a.txt && [ -f new.txt ] && [ ! -d "$t/wt/w" ] && [ ! -e "$t/rv.called" ]'
 check "light: nothing committed" '[ "$(git rev-list --count HEAD)" = 1 ]'
@@ -53,6 +58,7 @@ reset
 export CW_APPLY_LINES=1
 out=$(RV="DONE review: clean" "$here/bin/cwgo" -A w coder -W w -T true -- "$t/task.md" 2>&1); echo "$out" | grep '^==='
 check "heavy clean: reviewer ran, APPLIED review=clean" '[ -e "$t/rv.called" ] && echo "$out" | grep -q "^=== APPLIED w:.*review=clean" && grep -q three a.txt'
+check "reviewer: live pid while running" '[ "$(cat "$t/rv.live")" = live ]'
 reset
 out=$(RV="DONE review: 1 blocker" "$here/bin/cwgo" -A w coder -W w -T true -- "$t/task.md" 2>&1); echo "$out" | grep '^==='
 check "heavy blocker: NOT APPLIED, worktree kept" 'echo "$out" | grep -q "^=== NOT APPLIED w: review found blockers" && [ "$(cat a.txt)" = "$(printf "one\ntwo")" ] && [ -d "$t/wt/w" ]'

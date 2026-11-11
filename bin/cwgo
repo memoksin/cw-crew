@@ -19,7 +19,7 @@ while [ "${1:-}" = -d ] || [ "${1:-}" = -A ]; do
   if [ "$1" = -d ]; then detach=1; else auto=1; fi
   shift
 done
-[ $# -ge 2 ] || die "usage: cwgo [-d] [-A] NAME scout|coder [cw options...] [-- spec.md...]"
+[ $# -ge 2 ] || die "usage: cwgo [-d] [-A] NAME scout|coder|reviewer [cw options...] [-- spec.md...]"
 name=$1; shift
 case $name in *[!A-Za-z0-9._-]*) die "bad name: $name" ;; esac
 args=(); files=()
@@ -51,6 +51,7 @@ fi
 [ -s "$fleet/$n.task" ] || die "empty task"
 here=$(dirname "$0")
 . "$here/cwaccept.sh"
+echo $$ > "$fleet/$n.pid"
 CW_NAME=$n nohup "$here/cw" "${args[@]}" < "$fleet/$n.task" > "$fleet/$n.out" 2> "$fleet/$n.err" &
 pid=$!
 echo $pid > "$fleet/$n.pid"
@@ -76,6 +77,7 @@ apply_worker() {
   [ "$nfiles" -ge "${CW_APPLY_FILES:-4}" ] && heavy=1
   printf '%s\n' "$nums" | cut -f3- | grep -qE "${CW_APPLY_RISKY:-auth|secret|token|passw|credential|permission|migrat|deny|security|\.env}" && heavy=1
   if [ $heavy = 1 ]; then
+    echo $$ > "$fleet/$n.rv.pid"
     { echo "Review against this task spec:"; cat "$fleet/$n.task"; } | (cd "$root" && CW_NAME=$n.rv "$here/cw" reviewer -W "$awt") > "$fleet/$n.rv.out" 2> "$fleet/$n.rv.err"
     rv=$(grep -m1 '[^[:space:]]' "$fleet/$n.rv.out")
     # exact verdicts: "10 blocker" or "BLOCKED: ... cleanly" must not pass
