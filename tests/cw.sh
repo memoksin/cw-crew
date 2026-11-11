@@ -310,6 +310,8 @@ for mode in fail script custom exit off zero; do
 done
 unset CW_ACCEPT_FAIL_RE
 
+CW_ENTRYPOINT=cw-crew CW_PRIORITY=api CW_API_KEY=k "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "api provider: no custom client label" '[ ! -s "$t/ep" ]'
 CW_PRIORITY=api CW_API_KEY=sk-test-redact-123 FAKE_RESULT="leak sk-test-redact-123" "$here/bin/cw" scout <<< "x" > "$t/out" 2>"$t/err"
 check "an API key printed by the worker is redacted in logs and report" '! grep -rqF sk-test-redact-123 "$CW_LOG_DIR" "$t/out" "$t/err" && grep -qF "[api-key]" "$t/out"'
 

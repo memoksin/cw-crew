@@ -435,7 +435,8 @@ if [ -n "$cdx" ]; then
     + (if $sch != "" then {structured_output:($txt | fromjson? // null)} else {} end)' "$log.jsonl" > "$log.json"
 else
 # Opt-in client label: headless claude -p otherwise reports sdk-cli, which users measure as a faster 5-hour drain (anthropics/claude-code#97074).
-ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
+# Not on the api provider: with a custom label an API-key run is refused with "Credit balance is too low".
+ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && [ "${provider:-}" != api ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
 printf '%s' "$task" | (cd "$dir" || exit 2; [ "$provider" != api ] || export ANTHROPIC_API_KEY="$api_key"
   tlimit "$tmo" env "${scrub[@]}" ${ep[@]+"${ep[@]}"} CLAUDE_CODE_SHELL="$(command -v bash)" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
