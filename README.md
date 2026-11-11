@@ -76,14 +76,22 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 |---|---|---|
 | `CW_SCOUT_MODEL` / `CW_CODER_MODEL` / `CW_REVIEWER_MODEL` | `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5` | worker models |
 | `CW_CODEX` | 0 | `1` = Codex tiers `luna`, `sol`, `astra` on; scouts default to `luna`, coders and reviewers to `sol`. **Tasks and the files workers read go to OpenAI** |
-| `CW_CODEX_MAX` | 90 | percent used (5h or weekly) at which a run falls back to Claude |
+| `CW_CODEX_MAX` | 90 | percent used (5h or weekly) at which a run falls back to Claude; 100 means use Codex until the limit is fully spent |
 | `CW_CODEX_TTL` | 60 | seconds one limit reading is reused (macOS; Linux reads every run) |
 | `CW_CODEX_DENY` | `$HOME/` + `.ssh`, `.aws`, `.azure`, `.config/gcloud`, `.gnupg`, `.netrc`, `.config/gh` | colon list of extra absolute paths Codex workers may not read; defaults always apply. Other reads remain open; `.codex` is not denied (auth/runtime) |
 | `CW_CODEX_DENY_GLOBS` | `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/*.p8`, `**/*.p12`, `**/*.pfx`, `**/*.crt`, `**/*.cer`, `**/*.der`, `**/*.jks`, `**/*.keystore`, `**/local.properties` | colon list of extra denied globs under the work dir; defaults always apply, at any depth (including the root) |
 | `CW_CODEX_LUNA`, `CW_CODEX_SOL`, `CW_CODEX_ASTRA` | `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | model behind each tier |
 | `CW_MAX_TURNS` | 80 | coder turn limit |
 | `CW_TIMEOUT` | 3600 coder / 1200 scout, reviewer | seconds |
+| `CW_ACCEPT_TMO` | 1800 | seconds acceptance command may run |
+| `CW_AUTO_CONTINUE` | 1 | number of automatic turn-limit continuations |
+| `CW_EXIT_GRACE` | 20 | seconds Claude gets to exit after its result |
+| `CW_JEV_MODEL` | `typesafe/jev-1.13` | OpenRouter model used for Jev effort selection |
+| `CW_APPLY_LINES` | 150 | changed lines requiring clean review before automatic apply |
+| `CW_APPLY_FILES` | 4 | changed files requiring clean review before automatic apply |
+| `CW_APPLY_RISKY` | `auth\|secret\|token\|passw\|credential\|permission\|migrat\|deny\|security\|\.env` | path regex requiring clean review before automatic apply |
 | `CW_REVIEW_MAX` | 60000 | characters of diff a reviewer gets inline; the rest it reads itself |
+| `CW_WAIT_REPORT` | 6000 | report bytes shown by `cwwait` |
 | `CW_LOG_DIR` | `~/.claude/cw-runs` | run logs (the pane reads them too); runs older than 2 days move to `$CW_LOG_DIR-archive` |
 | `CW_FLEET` | `$CW_LOG_DIR/fleet/<repo>` | fleet dir |
 | `CW_WT_ROOT` | `<repo>/.crew` | worktree root; default adds `/.crew/` to the repo's `.gitignore` |
