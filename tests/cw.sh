@@ -8,19 +8,27 @@ mkdir -p "$t/bin"
 cat > "$t/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"; printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-}" > "$FAKE/ep"
+printf '%s' "${ANTHROPIC_API_KEY+set}" > "$FAKE/key"; printf '%s' "${ANTHROPIC_AUTH_TOKEN+set}" > "$FAKE/auth"
+printf '%s %s\n' "${ANTHROPIC_API_KEY+api}" "$(grep -A1 -x -- --resume "$FAKE/args" | tail -1)" >> "$FAKE/calls"
 echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
+[ -z "${FAKE_STDERR:-}" ] || echo "$FAKE_STDERR" >&2
 [ -n "${FAKE_STOP:-}" ] && { echo '{"type":"system","subtype":"init","session_id":"sid-stop"}'; exit "$FAKE_STOP"; }
-sub=success
+[ "${FAKE_DRY:-}" = api-stderr ] && [ "${ANTHROPIC_API_KEY+x}" = x ] && { echo 'billing: Credit balance is too low' >&2; exit 1; }
+if { [ "${FAKE_DRY:-}" = api ] && [ "${ANTHROPIC_API_KEY+x}" = x ]; } || { [ "${FAKE_DRY:-}" = claude ] && [ "${ANTHROPIC_API_KEY+x}" != x ]; }; then
+  [ "${FAKE_DRY_EDIT:-0}" != 1 ] || echo progress >> a.txt
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Credit balance is too low: usage limit reached","session_id":"sid-1"}'; exit 1
+fi
+sub=${FAKE_SUBTYPE:-success}
 if [ "${FAKE_TURNS:-0}" = 1 ] && ! grep -qx -- --resume "$FAKE/args"; then
   echo progress >> a.txt; sub=error_max_turns
   echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":false}]}}'
 fi
 so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
-echo '{"type":"result","subtype":"'"$sub"'","is_error":false,'"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
+echo '{"type":"result","subtype":"'"$sub"'","is_error":'"${FAKE_ERROR:-false}"','"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_CODEX=0
-unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX CW_CODEX_MAX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
+unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX CW_CODEX_MAX CW_PRIORITY CW_SKIP CW_API_KEY CW_API_KEYCHAIN CW_API_RETRY GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
 fails=0
 ok() { echo "ok   $1"; }
 no() { echo "FAIL $1"; fails=$((fails + 1)); }
@@ -202,6 +210,80 @@ mkdir "$t/py"; touch "$t/py/uv.lock"; printf '#!/bin/sh\necho "$@" > "$FAKE/uvar
 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol -C "$t/py" <<< "x" >/dev/null 2>"$t/err"
 check "Codex coder in a uv project: synced first, no sync in the sandbox" 'grep -q "sync --frozen" "$t/uvargs" && grep -qx 1 "$t/cxuv"'
 rm -f "$t/bin/uv"
+
+# Provider priority is independent of model level; keys stay out of argv and run files.
+export CW_PRIORITY=codex:api:claude CW_CODEX=0 CW_CODEX_TTL=0 CW_API_KEY=priority-secret-not-for-logs
+oldlogs=$CW_LOG_DIR; export CW_LOG_DIR=$t/priority-logs
+rm -f "$t/args" "$t/cxargs"
+FAKE_USED=99 "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: Codex at 99% still runs with CW_CODEX=0" '[ $rc = 0 ] && cx gpt-6.1-sol && [ ! -e "$t/args" ] && grep -qx "cw: provider=codex" "$t/err"'
+rm -f "$t/cxargs"
+FAKE_USED=100 "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: Codex at 100% skips to API with the key" '[ $rc = 0 ] && [ ! -e "$t/cxargs" ] && [ "$(cat "$t/key")" = set ] && grep -qx "cw: provider=api (skipped codex: Codex limit at 100% used)" "$t/err"'
+export CW_PRIORITY=api:claude
+CW_API_KEY= ANTHROPIC_API_KEY=caller-key ANTHROPIC_AUTH_TOKEN=caller-token "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: no API key uses Claude, scrubbing inherited key and auth" '[ $rc = 0 ] && [ ! -s "$t/key" ] && [ ! -s "$t/auth" ] && grep -q "provider=claude" "$t/err"'
+ANTHROPIC_AUTH_TOKEN=caller-token "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API key present, provider meta, no secret in logs or stderr or args" '[ $rc = 0 ] && [ "$(cat "$t/key")" = set ] && [ ! -s "$t/auth" ] && jq -e ".provider == \"api\"" "$(ls -t "$CW_LOG_DIR"/*.meta | head -1)" >/dev/null && ! grep -rF "$CW_API_KEY" "$CW_LOG_DIR" "$t/err" "$t/args"'
+: > "$t/calls"
+FAKE_SUBTYPE=error_max_turns FAKE_ERROR=true "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API turn limit is not credit spent or a provider switch" '[ $rc = 1 ] && [ ! -e "$CW_LOG_DIR/dirs/.api-spent" ] && [ "$(cat "$t/calls")" = "api " ] && grep -q "rc=0 error_max_turns" "$t/err" && ! grep -q "trying next provider" "$t/err"'
+: > "$t/calls"
+FAKE_STDERR=billing FAKE_RESULT="DONE billing report" "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API success mentioning billing in result and stderr is not dry" '[ $rc = 0 ] && [ ! -e "$CW_LOG_DIR/dirs/.api-spent" ] && [ "$(cat "$t/calls")" = "api " ] && grep -q "rc=0 success" "$t/err"'
+CW_PRIORITY=claude:api FAKE_RESULT="DONE checked rate limit" FAKE_STDERR="usage limit" "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: Claude success mentioning rate limit in report stays successful" '[ $rc = 0 ] && [ ! -s "$t/key" ] && grep -q "rc=0 success" "$t/err" && ! grep -q "trying next provider" "$t/err"'
+CW_PRIORITY="" CW_CODEX=1 FAKE_USED=95 "$here/bin/cw" scout <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "empty priority: legacy Codex threshold and no provider diagnostic" '[ $rc = 0 ] && arg claude-haiku-5-5 && grep -q "Codex limit at 95% used" "$t/err" && ! grep -q "cw: provider=" "$t/err"'
+CW_PRIORITY="" "$here/bin/cw" coder -P claude <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "empty priority: -P still works without a provider diagnostic" '[ $rc = 0 ] && arg claude-sonnet-5-5 && ! grep -q "cw: provider=" "$t/err"'
+export CW_PRIORITY=codex:claude
+rm -f "$t/args"
+"$here/bin/cw" coder -M sonnet <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: -M sonnet selects level 2 on Codex" '[ $rc = 0 ] && cx gpt-6.1-sol && [ ! -e "$t/args" ]'
+rm -f "$t/cxargs"
+"$here/bin/cw" coder -P claude -M sonnet <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: -P claude forces Claude without changing level" '[ $rc = 0 ] && arg claude-sonnet-5-5 && [ ! -e "$t/cxargs" ] && [ ! -s "$t/key" ]'
+export CW_PRIORITY=api:claude
+: > "$t/calls"
+FAKE_DRY=api "$here/bin/cw" coder -M opus <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: dry API marks spent, resumes same session on Claude, rc 0" '[ $rc = 0 ] && [ -f "$CW_LOG_DIR/dirs/.api-spent" ] && [ "$(cat "$t/calls")" = "$(printf "api \n sid-1")" ] && arg --resume && arg sid-1 && arg claude-opus-5-5 && grep -q "Continue exactly where you stopped" "$t/prompt"'
+"$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: later run skips recently spent API" '[ $rc = 0 ] && [ ! -s "$t/key" ] && grep -q "provider=claude (skipped api: API credit spent)" "$t/err"'
+CW_API_RETRY=0 "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API retries after the spent interval" '[ $rc = 0 ] && [ "$(cat "$t/key")" = set ]'
+cp a.txt "$t/before-dry"
+CW_API_RETRY=0 FAKE_DRY=api FAKE_DRY_EDIT=1 "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API to Claude resumes even after file changes" '[ $rc = 0 ] && arg --resume && arg sid-1 && [ ! -s "$t/key" ] && grep -qx progress a.txt'
+cp "$t/before-dry" a.txt
+CW_API_RETRY=0 FAKE_DRY=api-stderr "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: API billing stderr without a result resumes the init session" '[ $rc = 0 ] && [ ! -s "$t/key" ] && arg --resume && arg sid-1 && [ -f "$CW_LOG_DIR/dirs/.api-spent" ]'
+: > "$t/calls"
+CW_PRIORITY=claude:api CW_API_RETRY=0 FAKE_DRY=claude "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: dry Claude resumes the same session on API" '[ $rc = 0 ] && [ "$(cat "$t/calls")" = "$(printf " \napi sid-1")" ] && arg --resume && [ "$(cat "$t/key")" = set ]'
+rm -f "$t/cxargs"
+CW_PRIORITY=api:codex CW_API_RETRY=0 FAKE_DRY=api "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: no Claude provider left stops with subtype, not a Codex resume" '[ $rc != 0 ] && [ ! -e "$t/cxargs" ] && grep -q "^\[cw coder .*usage_limit" "$t/err"'
+CW_PRIORITY=api:claude:api CW_API_RETRY=0 FAKE_DRY=api "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: repeated dry providers do not hide the next provider" '[ $rc = 0 ] && [ ! -s "$t/key" ] && arg --resume'
+rm -f "$t/args"
+CW_PRIORITY=codex:api:claude CW_API_RETRY=0 FAKE_CX=limit "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: Codex dry without edits starts fresh on API" '[ $rc = 0 ] && [ "$(cat "$t/key")" = set ] && ! arg --resume && grep -q "provider=api" "$t/err"'
+rm -f "$t/args"
+CW_PRIORITY=codex:api:claude FAKE_CX=edit "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: Codex dry with edits still stops for the lead" '[ $rc != 0 ] && [ ! -e "$t/args" ] && grep -q "usage_limit" "$t/err"'
+cp "$t/before-dry" a.txt
+rm -f "$t/args" "$t/cxargs"
+CW_PRIORITY=codex:nope:claude "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: unknown provider exits 2 before any model call" '[ $rc = 2 ] && [ ! -e "$t/args" ] && [ ! -e "$t/cxargs" ] && grep -q "unknown provider: nope" "$t/err"'
+CW_PRIORITY=codex:claude FAKE_USED=100 "$here/bin/cw" coder -P codex <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "priority: forced unavailable Codex exits 2 with reason" '[ $rc = 2 ] && [ ! -e "$t/args" ] && [ ! -e "$t/cxargs" ] && grep -q "Codex limit at 100% used" "$t/err"'
+unset CW_PRIORITY CW_API_KEY CW_CODEX CW_CODEX_TTL
+ANTHROPIC_API_KEY=inherited "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "unset priority: inherited API key still records provider Claude" '[ $rc = 0 ] && [ "$(cat "$t/key")" = set ] && jq -e ".provider == \"claude\"" "$(ls -t "$CW_LOG_DIR"/*.meta | head -1)" >/dev/null && ! grep -q "cw: provider=" "$t/err"'
+"$here/bin/cw" coder -P claude -M sonnet <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "unset priority: -P claude works without CW_PRIORITY" '[ $rc = 0 ] && arg claude-sonnet-5-5 && [ ! -s "$t/key" ]'
+export CW_LOG_DIR=$oldlogs
 rm -f "$t/bin/codex"
 
 # -A must check main-tree output too, even when the command exits 0 (worker run stays clean).
@@ -227,6 +309,9 @@ for mode in fail script custom exit off zero; do
   esac
 done
 unset CW_ACCEPT_FAIL_RE
+
+CW_PRIORITY=api CW_API_KEY=sk-test-redact-123 FAKE_RESULT="leak sk-test-redact-123" "$here/bin/cw" scout <<< "x" > "$t/out" 2>"$t/err"
+check "an API key printed by the worker is redacted in logs and report" '! grep -rqF sk-test-redact-123 "$CW_LOG_DIR" "$t/out" "$t/err" && grep -qF "[api-key]" "$t/out"'
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed (0 failures)" || { echo "$fails failed"; exit 1; }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cw — run one headless Claude worker. Task on stdin, report on stdout, one meta line on stderr.
-#   cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-S schema.json] < task.md
+#   cw scout|coder|reviewer [-M tier] [-P provider] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-S schema.json] < task.md
 #   -S file: JSON Schema for the report (scout, coder). Meta line: schema=pass|FAIL; on pass the
 #     compact structured_output JSON is the last stdout line. FAIL makes an rc-0 run rc 1. Not persisted: pass it again on -r.
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
@@ -9,6 +9,7 @@
 #   -W name: run in a git worktree in <repo>/.crew (cwwt create name; reused if it exists). -K: extra ignored path to clone
 #     into it (besides <repo>/.cw-copy). Merge back with: cwwt diff|apply|rm name. A resume (-r) returns to the run's dir.
 #   -M tier: luna|sol|astra (Codex, ChatGPT plan quota) or haiku|sonnet|opus (Claude). See the tier block.
+#   CW_PRIORITY=codex:api:claude: first available provider; -M picks only the level. -P forces one provider (also without CW_PRIORITY).
 #   -D dir: extra directory the worker may read (repeatable; e.g. screenshots under /tmp for a review).
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
@@ -30,14 +31,25 @@ tlimit() {
   perl -e 'alarm shift; exec @ARGV' "$t" "$@"
 }
 
-usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-S schema.json] < task" >&2; exit 2; }
+usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-P provider] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-S schema.json] < task" >&2; exit 2; }
 argv=("$@")   # for a rerun on Claude when Codex hits a limit
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
-base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""
-while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:S:" o; do
-  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; S) schema=$OPTARG ;; *) usage ;; esac
+base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""; forced=""
+while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:S:P:" o; do
+  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; S) schema=$OPTARG ;; P) forced=$OPTARG ;; *) usage ;; esac
 done
+priority=""; providers=()
+if [ -n "${CW_PRIORITY:-}" ] || [ -n "$forced" ]; then
+  priority=1; IFS=: read -ra providers <<< "${CW_PRIORITY:-$forced}"
+  [ ${#providers[@]} -gt 0 ] || { echo "cw: empty provider list" >&2; exit 2; }
+  for p in "${providers[@]}"; do
+    case $p in codex|api|claude) ;; *) echo "cw: unknown provider: $p" >&2; exit 2 ;; esac
+  done
+  case $forced in ""|codex|api|claude) ;; *) echo "cw: unknown provider: $forced" >&2; exit 2 ;; esac
+  case ${CW_PRIORITY-} in *:) echo "cw: empty provider name" >&2; exit 2 ;; esac
+  [ -z "$forced" ] || providers=("$forced")
+fi
 [ "$role" = reviewer ] && [ -n "$web" ] && { echo "cw: reviewer has no web" >&2; exit 2; }
 if [ -n "$schema" ]; then
   [ "$role" = reviewer ] && { echo "cw: -S is for scout and coder" >&2; exit 2; }
@@ -150,11 +162,78 @@ fi
 # luna, sol, astra run on Codex (ChatGPT plan quota) and need CW_CODEX=1, which also makes them the role defaults: scout
 # luna, coder and reviewer sol. They fall back to Claude (haiku/sonnet, astra: opus) when Codex is off or missing, the run
 # needs -a, or either limit window is at CW_CODEX_MAX percent used. A Claude session keeps resuming on Claude.
+codex_available() {
+  local max=90; [ -z "${CW_PRIORITY:-}" ] || max=100
+  why=""; mark=${resume:+$logdir/dirs/$resume.codex}
+  if [ -z "$priority" ] && [ "${CW_CODEX:-0}" != 1 ]; then why="codex tiers are off (CW_CODEX=1 turns them on)"
+  elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
+  elif ! command -v codex >/dev/null; then why="codex not on PATH"
+  elif [ -n "$resume" ] && [ ! -f "$mark" ]; then why="session $resume is not a Codex session"
+  elif [ -z "$resume" ] || [ -n "$priority" ]; then
+    # A fleet starts workers together: one reading serves them all for CW_CODEX_TTL seconds.
+    cache=$logdir/dirs/.codex-limits
+    if [ -z "$(find "$cache" -mtime -"${CW_CODEX_TTL:-60}"s 2>/dev/null)" ] || [ ! -s "$cache" ]; then
+      "$here/cwcodex" > "$cache.$$" 2>/dev/null && mv "$cache.$$" "$cache" || rm -f "$cache.$$" "$cache"
+    fi
+    used=$(jq -r '[.five, .week] | max' "$cache" 2>/dev/null)
+    cx5=$(jq -r '100 - .five' "$cache" 2>/dev/null); cxw=$(jq -r '100 - .week' "$cache" 2>/dev/null)
+    if [ -z "$used" ]; then why="no Codex limit reading (signed in? codex login)"
+    elif [ "${used%.*}" -ge "${CW_CODEX_MAX:-$max}" ]; then why="Codex limit at $used% used"; fi
+  fi
+  [ -n "$why" ] && return 1
+  [ -z "$resume" ] || cdx=$(cat "$mark")
+  return 0
+}
+select_provider() {
+  local p i first=0 last=${CW_SKIP:-} choices=("${providers[@]}")
+  last=${last##*:}
+  provider=""; skipped=""; api_key=""; why="no provider left"
+  if [ -n "$resume" ] && [ -f "$logdir/dirs/$resume.codex" ]; then
+    [ -z "$forced" ] || [ "$forced" = codex ] || { why="a Codex session cannot resume on $forced: rerun it fresh"; return 1; }
+    choices=(codex)
+  fi
+  for ((i=0; i<${#choices[@]}; i++)); do
+    [ "${choices[i]}" != "$last" ] || { first=$((i + 1)); break; }
+  done
+  for ((i=first; i<${#choices[@]}; i++)); do
+    p=${choices[i]}; why=""
+    case :${CW_SKIP:-}: in *:"$p":*) continue ;; esac
+    case $p in
+      codex) codex_available || : ;;
+      api)
+        api_key=${CW_API_KEY:-$([ -n "${CW_API_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_API_KEYCHAIN" -w 2>/dev/null)}
+        if [ -z "$api_key" ]; then why="no API key"
+        elif [ -f "$logdir/dirs/.api-spent" ] && perl -e 'exit(time - (stat $ARGV[0])[9] < $ARGV[1] ? 0 : 1)' "$logdir/dirs/.api-spent" "${CW_API_RETRY:-3600}"; then why="API credit spent"; fi ;;
+    esac
+    if [ -z "$why" ]; then provider=$p; return 0; fi
+    skipped+="${skipped:+; }skipped $p: $why"
+  done
+  return 1
+}
 prev=""; saved_model=""
 [ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
 if [ -z "$tier" ] && [ -n "$prev" ] && [ ! -f "$logdir/dirs/$resume.codex" ]; then
   saved_model=$(jq -r '.model // empty' "${prev%.json}.meta" 2>/dev/null)
 fi
+if [ -n "$priority" ]; then
+  select_provider || { echo "cw: ${why:-no provider left}" >&2; exit 2; }
+  case $tier in
+    "") [ "$role" = scout ] && level=1 || level=2 ;;
+    1|haiku|luna) level=1 ;; 2|sonnet|sol) level=2 ;; 3|opus|astra) level=3 ;; *) usage ;;
+  esac
+  if [ "$provider" = codex ]; then
+    case $level in 1) cdx=${CW_CODEX_LUNA:-gpt-6-luna} ;; 2) cdx=${CW_CODEX_SOL:-gpt-6.1-sol} ;; 3) cdx=${CW_CODEX_ASTRA:-gpt-6-astra} ;; esac
+    [ -z "$resume" ] || cdx=$(cat "$logdir/dirs/$resume.codex")
+    model=codex/$cdx; bucket=Codex; saved_model=""
+    sp="$sp You run in an OS sandbox: writes outside the work dir, the network and .git are blocked, and a blocked call cannot be approved. Use your shell tool and apply_patch. Never spawn sub-agents and never wait for the user."
+  else
+    cdx=""
+    if [ -n "$tier" ]; then
+      case $level in 1) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; 2) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; 3) model=claude-opus-5-5 ;; esac
+    fi
+  fi
+  [ -z "${CW_PRIORITY:-}" ] || echo "cw: provider=$provider${skipped:+ ($skipped)}" >&2
+else
 if [ -z "$tier" ] && [ "${CW_CODEX:-0}" = 1 ] && [ ${#granted[@]} -eq 0 ] && { [ -z "$resume" ] || [ -f "$logdir/dirs/$resume.codex" ]; }; then
   [ "$role" = scout ] && tier=luna || tier=sol
 fi
@@ -167,23 +246,7 @@ case $tier in
   *) usage ;;
 esac
 if [ -n "$cdx" ]; then
-  why=""; mark=${resume:+$logdir/dirs/$resume.codex}
-  if [ "${CW_CODEX:-0}" != 1 ]; then why="codex tiers are off (CW_CODEX=1 turns them on)"
-  elif [ ${#granted[@]} -gt 0 ]; then why="-a grants need a Claude tier"
-  elif ! command -v codex >/dev/null; then why="codex not on PATH"
-  elif [ -n "$resume" ]; then
-    if [ -f "$mark" ]; then cdx=$(cat "$mark"); else why="session $resume is not a Codex session"; fi
-  else
-    # A fleet starts workers together: one reading serves them all for CW_CODEX_TTL seconds.
-    cache=$logdir/dirs/.codex-limits
-    if [ -z "$(find "$cache" -mtime -"${CW_CODEX_TTL:-60}"s 2>/dev/null)" ] || [ ! -s "$cache" ]; then
-      "$here/cwcodex" > "$cache.$$" 2>/dev/null && mv "$cache.$$" "$cache" || rm -f "$cache.$$" "$cache"
-    fi
-    used=$(jq -r '[.five, .week] | max' "$cache" 2>/dev/null)
-    cx5=$(jq -r '100 - .five' "$cache" 2>/dev/null); cxw=$(jq -r '100 - .week' "$cache" 2>/dev/null)
-    if [ -z "$used" ]; then why="no Codex limit reading (signed in? codex login)"
-    elif [ "${used%.*}" -ge "${CW_CODEX_MAX:-90}" ]; then why="Codex limit at $used% used"; fi
-  fi
+  codex_available || :
   if [ -n "$why" ]; then
     [ -n "$resume" ] && [ -f "$mark" ] && { echo "cw: $why; a Codex session cannot resume on Claude: rerun it fresh" >&2; exit 2; }
     case $role in scout) model=${CW_SCOUT_MODEL:-claude-haiku-5-5} ;; reviewer) model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5} ;; *) model=${CW_CODER_MODEL:-claude-sonnet-5-5} ;; esac
@@ -193,6 +256,8 @@ if [ -n "$cdx" ]; then
     model=codex/$cdx; bucket=Codex
     sp="$sp You run in an OS sandbox: writes outside the work dir, the network and .git are blocked, and a blocked call cannot be approved. Use your shell tool and apply_patch. Never spawn sub-agents and never wait for the user."
   fi
+fi
+provider=claude; [ -z "$cdx" ] || provider=codex
 fi
 
 [ -n "$saved_model" ] && model=$saved_model
@@ -234,12 +299,14 @@ if [ "$effort" = auto ]; then
 fi
 args+=(--effort "$effort" "${adddirs[@]+"${adddirs[@]}"}")
 log="$logdir/$(date +%Y%m%d-%H%M%S)-$role-$$"
+if [ -n "$priority" ]; then while [ -e "$log.meta" ]; do log=$log-next; done; fi
 start=$(date +%s)
 tree0=$(snap)
 # Nested launches inherit the parent session's vars and can hang or refuse to start.
 scrub=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET
        -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_SESSION_ATTENDED
        -u CLAUDE_CODE_EXECPATH -u CLAUDE_PID -u CLAUDE_EFFORT)
+[ -z "$priority" ] || { scrub+=(-u CW_API_KEY -u ANTHROPIC_AUTH_TOKEN); [ "$provider" = api ] || scrub+=(-u ANTHROPIC_API_KEY); }
 # Workers run tool commands in bash: the user's zsh snapshot brings aliases (ls -> eza --icons) that
 # change output and once hung a worker for 8 minutes.
 # cmux's claude shim drops ANTHROPIC_API_KEY (workers fall back to the subscription): call the real binary.
@@ -252,13 +319,13 @@ PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'cmux-cli-shims' | paste -sd:
 # Live state for the cw-crew pane: .meta at start, one compact line per step in .events, rc in .done.
 title=$(printf '%s' "$task" | perl -ne 's/^\s*(#+\s*)?(goal|task)\s*:?\s*//i; if (/\S/) { print; exit }' | cut -c1-160)
 branch=$(git -C "$dir" branch --show-current 2>/dev/null)
-jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
+jq -nc --arg role "$role" --arg model "$model" --arg provider "$provider" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
   --arg qhome "${cdx:+codex}" --arg bucket "${bucket:-}" --arg a5 "${cx5:-}" --arg aw "${cxw:-}" \
   --argjson hasq "$([ -n "$cdx" ] && echo 1 || echo 0)" \
   --argjson acc "$([ -n "$accept" ] && echo true || echo false)" \
-  '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
+  '{name:$name,role:$role,model:$model,provider:$provider,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
   + (if $hasq == 1 then {quota: {home: $qhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null)}} else {} end) + (if $acc then {accept:true} else {} end)' \
   > "$log.meta"
 # The pane polls live/ (one empty marker per running worker), not the whole run dir.
@@ -298,6 +365,10 @@ ev='fromjson? |
     cin:.usage.cache_read_input_tokens,nin:((.usage.input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
     win:([.modelUsage[]?.contextWindow // empty] | max)}
   else empty end | .t=(now*1000|floor)'
+cx_limit_re='usage limit|rate limit|quota'; cx_context_re='context (window|length)|too long|too large'
+api_limit_re='credit balance|billing'; claude_limit_re='usage limit|limit reached|rate limit'
+# A worker that prints its own environment must not put the API key into the run logs.
+redact() { if [ -n "${api_key:-}" ]; then CW_REDACT=$api_key perl -pe 'BEGIN { $| = 1; $k = $ENV{CW_REDACT} } s/\Q$k\E/[api-key]/g'; else cat; fi; }
 if [ -n "$cdx" ]; then
   # The lean start: 3.6k input tokens against 27k for a plain `codex exec`. agents.enabled is the switch that removes
   # the multi-agent tools and text; --disable multi_agent does not. Ignoring the user config also drops MCP and plugins.
@@ -347,14 +418,14 @@ if [ -n "$cdx" ]; then
   rc=${PIPESTATUS[1]}
   # Codex JSONL -> a Claude-shaped .json so everything below works unchanged. `error` events alone are not fatal: Codex
   # also sends them for retries, so only a missing turn.completed fails the run.
-  jq -Rsc --arg m "$model" --arg sch "${schema:+1}" '[split("\n")[] | fromjson?] as $e
+  jq -Rsc --arg m "$model" --arg sch "${schema:+1}" --arg lim "$cx_limit_re" --arg ctx "$cx_context_re" '[split("\n")[] | fromjson?] as $e
     | ($e | map(select(.type=="turn.completed")) | last) as $d
     | ($e | map(select(.type=="item.completed" and .item.type=="agent_message") | .item.text) | last // "") as $txt
     | ($e | map(select(.type=="turn.failed" or .type=="error") | (.error.message // .message // "")) | last // "") as $err
     | {type:"result", is_error:($d == null or $txt == ""),
        subtype:(if $d == null then
-           (if ($err|test("usage limit|rate limit|quota";"i")) then "usage_limit"
-            elif ($err|test("context (window|length)|too long|too large";"i")) then "context_limit" else "failed" end)
+           (if ($err|test($lim;"i")) then "usage_limit"
+            elif ($err|test($ctx;"i")) then "context_limit" else "failed" end)
          elif $txt == "" then "empty_response" else "success" end),
        result:(if $txt != "" then $txt else $err end), session_id:($e | map(select(.type=="thread.started") | .thread_id) | first // ""),
        num_turns:(1 + ($e | map(select(.type=="item.completed" and (.item.type|test("command_execution|file_change|web_search")))) | length)),
@@ -365,10 +436,11 @@ if [ -n "$cdx" ]; then
 else
 # Opt-in client label: headless claude -p otherwise reports sdk-cli, which users measure as a faster 5-hour drain (anthropics/claude-code#97074).
 ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
-printf '%s' "$task" | (cd "$dir" && tlimit "$tmo" env "${scrub[@]}" ${ep[@]+"${ep[@]}"} CLAUDE_CODE_SHELL="$(command -v bash)" \
+printf '%s' "$task" | (cd "$dir" || exit 2; [ "$provider" != api ] || export ANTHROPIC_API_KEY="$api_key"
+  tlimit "$tmo" env "${scrub[@]}" ${ep[@]+"${ep[@]}"} CLAUDE_CODE_SHELL="$(command -v bash)" \
   claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
-  | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
+  | redact | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
 rc=${PIPESTATUS[1]}
 jq -Rc 'fromjson? | select(.type=="result")' "$log.jsonl" | tail -1 > "$log.json"
 fi
@@ -380,9 +452,42 @@ if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
   git -C "$dir" diff --numstat "$tree0" "$tree1" 2>/dev/null | awk -v t="$(( $(date +%s) * 1000 ))" \
     '{a+=$1; d+=$2; n++} END {printf "{\"e\":\"diff\",\"add\":%d,\"del\":%d,\"files\":%d,\"t\":%s}\n", a, d, n, t}' >> "$log.events"
 fi
+# A dry Claude provider can continue the same session, even with edits; Codex still needs a fresh, unchanged tree.
+if [ -n "$priority" ]; then
+  dry=""
+  case $provider in
+    codex) case $(jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit) dry=1 ;; esac ;;
+    api) if jq -e --arg re "$api_limit_re" '.is_error == true and ((.result // "") | test($re;"i"))' "$log.json" >/dev/null 2>&1 \
+      || { ! jq -e '.is_error == false' "$log.json" >/dev/null 2>&1 && grep -qiE "$api_limit_re" "$log.err"; }; then dry=1; touch "$logdir/dirs/.api-spent"; fi ;;
+    claude) if jq -e --arg re "$claude_limit_re" '.is_error == true and ((.result // "") | test($re;"i"))' "$log.json" >/dev/null 2>&1 \
+      || { ! jq -e '.is_error == false' "$log.json" >/dev/null 2>&1 && grep -qiE "$claude_limit_re" "$log.err"; }; then dry=1; fi ;;
+  esac
+  if [ -n "$dry" ]; then
+    [ -n "$sid" ] || sid=$(jq -sr 'map(select(.e=="init")) | last | .sid // empty' "$log.events" 2>/dev/null)
+    jq -sc --arg sid "$sid" --arg model "$model" '
+      {type:"result",result:"Provider limit reached",session_id:$sid,num_turns:0,usage:{input_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0,output_tokens:0},modelUsage:{($model):{}},permission_denials:[]}
+      + (.[0] // {}) + {is_error:true} | .subtype = (if .subtype == "context_limit" then .subtype else "usage_limit" end)' "$log.json" > "$log.tmp" && mv "$log.tmp" "$log.json"
+    [ "$rc" != 0 ] || rc=1
+    skip=${CW_SKIP:+$CW_SKIP:}$provider
+    if { [ "$provider" != codex ] || { [ -z "$resume" ] && { [ "$role" != coder ] || { [ -n "$tree0" ] && [ "$tree1" = "$tree0" ]; }; }; }; } \
+       && (export CW_SKIP=$skip; if [ "$provider" = codex ]; then resume=""; else resume=$sid; fi; select_provider); then
+      echo "$rc" > "$log.done"; rm -f "$live"
+      again=("${argv[@]}")
+      if [ "$provider" = codex ]; then
+        rm -f "$logdir/dirs/.codex-limits"
+        echo "cw: codex stopped ($(jq -r .subtype "$log.json")), no file changes; trying next provider" >&2
+        CW_SKIP=$skip exec "$0" "${again[@]}" <<< "$spec"
+      fi
+      again+=(-r "$sid")
+      echo "cw: $provider stopped (usage_limit); trying next provider${sid:+, resuming sid=$sid}" >&2
+      [ -n "$sid" ] && spec="You hit a provider limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
+      CW_SKIP=$skip CW_CONT=1 exec "$0" "${again[@]}" <<< "$spec"
+    fi
+  fi
+fi
 # Codex hit a limit or a full context with no work to keep: run the same task on Claude. A coder that changed files
 # stops here, so the lead can hand that tree to a fresh Claude worker.
-case $([ -n "$cdx" ] && jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit)
+case $([ -z "$priority" ] && [ -n "$cdx" ] && jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit)
   if [ -z "$resume" ] && { [ "$role" != coder ] || { [ -n "$tree0" ] && [ "$tree1" = "$tree0" ]; }; }; then
     echo "$rc" > "$log.done"; rm -f "$live" "$logdir/dirs/.codex-limits"
     echo "cw: codex stopped ($(jq -r .subtype "$log.json")), no file changes; rerunning on Claude" >&2
@@ -400,6 +505,7 @@ if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.sub
   # no .done for this segment: the crew pane would toast it as failed; the resumed run (same pid) carries on
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
   again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept"); [ -n "$schema" ] && again+=(-S "$schema")
+  [ -z "$forced" ] || again+=(-P "$forced")
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
   for ((i=1; i<${#adddirs[@]}; i+=2)); do again+=(-D "${adddirs[i]}"); done
   rm -f "$live"
