@@ -466,7 +466,7 @@ if [ -n "$priority" ]; then
     [ -n "$sid" ] || sid=$(jq -sr 'map(select(.e=="init")) | last | .sid // empty' "$log.events" 2>/dev/null)
     jq -sc --arg sid "$sid" --arg model "$model" '
       {type:"result",result:"Provider limit reached",session_id:$sid,num_turns:0,usage:{input_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0,output_tokens:0},modelUsage:{($model):{}},permission_denials:[]}
-      + (.[0] // {}) + {is_error:true} | .subtype = (if .subtype == "context_limit" then .subtype else "usage_limit" end)' "$log.json" > "$log.tmp" && mv "$log.tmp" "$log.json"
+      + (.[0] // {}) + {is_error:true} | .subtype = (if .subtype == "context_limit" then .subtype else "usage_limit" end) | if (.modelUsage | length) > 0 then . else .modelUsage = {($model):{}} end' "$log.json" > "$log.tmp" && mv "$log.tmp" "$log.json"
     [ "$rc" != 0 ] || rc=1
     skip=${CW_SKIP:+$CW_SKIP:}$provider
     if { [ "$provider" != codex ] || { [ -z "$resume" ] && { [ "$role" != coder ] || { [ -n "$tree0" ] && [ "$tree1" = "$tree0" ]; }; }; }; } \
