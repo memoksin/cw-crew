@@ -9,12 +9,18 @@ cat > "$t/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE/args"; cat > "$FAKE/prompt"; printf '%s' "${CLAUDE_CODE_ENTRYPOINT:-}" > "$FAKE/ep"
 echo '{"type":"system","subtype":"init","session_id":"sid-1"}'
+[ -n "${FAKE_STOP:-}" ] && { echo '{"type":"system","subtype":"init","session_id":"sid-stop"}'; exit "$FAKE_STOP"; }
+sub=success
+if [ "${FAKE_TURNS:-0}" = 1 ] && ! grep -qx -- --resume "$FAKE/args"; then
+  echo progress >> a.txt; sub=error_max_turns
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":false}]}}'
+fi
 so=; [ -n "${FAKE_SO:-}" ] && so='"structured_output":{"ok":true,"n":1},'
-echo '{"type":"result","subtype":"success","is_error":false,'"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
+echo '{"type":"result","subtype":"'"$sub"'","is_error":false,'"$so"'"result":"'"${FAKE_RESULT:-DONE review: clean}"'","session_id":"sid-1","num_turns":1,"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"m":{}},"permission_denials":[],"total_cost_usd":0.01}'
 EOF
 chmod +x "$t/bin/claude"
 export PATH="$t/bin:$PATH" FAKE=$t CW_LOG_DIR=$t/logs CW_WT_ROOT=$t/wt CW_JEV=0 CW_CODEX=0
-unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
+unset CW_REVIEWER_MODEL CW_SCOUT_MODEL CW_CODER_MODEL CW_TIMEOUT CW_ENTRYPOINT CW_CODEX CW_CODEX_MAX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2
 fails=0
 ok() { echo "ok   $1"; }
 no() { echo "FAIL $1"; fails=$((fails + 1)); }
@@ -80,6 +86,16 @@ check "coder unchanged: Sonnet, medium, edits" 'arg claude-sonnet-5-5 && arg med
 # Tiers: Claude tiers pick the model; any other name is rejected.
 "$here/bin/cw" scout -M opus <<< "x" >/dev/null 2>&1
 check "-M opus picks Opus 5.5" 'arg claude-opus-5-5'
+"$here/bin/cw" coder -r sid-1 -e high <<< "x" >/dev/null 2>&1
+check "Claude resume keeps the newest model even with explicit effort" 'arg claude-opus-5-5 && arg high'
+"$here/bin/cw" coder -r sid-1 -M sonnet <<< "x" >/dev/null 2>&1
+check "explicit -M wins over the resumed model" 'arg claude-sonnet-5-5'
+FAKE_TURNS=1 "$here/bin/cw" coder -M opus -D "$t" -D "$r" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "auto-continue keeps Opus and all -D dirs" '[ $rc = 0 ] && grep -q "auto-continuing sid=sid-1" "$t/err" && arg claude-opus-5-5 && arg --resume && [ "$(grep -c -- --add-dir "$t/args")" = 2 ] && arg "$t" && arg "$r"'
+FAKE_STOP=142 "$here/bin/cw" coder -C "$t" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "no result: newest init sid in timeout meta and resume directory" '[ $rc = 142 ] && grep -qE "^\[cw coder .* rc=142 sid=sid-stop [0-9]+s log=.*\.err\]$" "$t/err" && [ "$(cat "$CW_LOG_DIR/dirs/sid-stop")" = "$t" ]'
+"$here/bin/cw" coder -T true <<< "x" >/dev/null 2>&1
+check "-T marks the run meta for the pane" 'jq -e ".accept == true" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null'
 rm -f "$t/args"
 "$here/bin/cw" coder -M flash <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "flash is an unknown tier: usage, rc 2, no model call" '[ $rc = 2 ] && grep -q "^usage: cw" "$t/err" && [ ! -e "$t/args" ]'
@@ -87,9 +103,12 @@ check "flash is an unknown tier: usage, rc 2, no model call" '[ $rc = 2 ] && gre
 # Jev: a sure high stays high, an unsure high runs at medium (fake curl answers for the decisions API).
 cat > "$t/bin/curl" <<'C'
 #!/usr/bin/env bash
+: > "$FAKE/jev-called"
 cat >/dev/null; printf '{"answers":{"effort":{"choice":"high","probabilities":{"low":0,"medium":%s,"high":%s}}}}' "$((100 - JEV_HIGH))e-2" "${JEV_HIGH}e-2"
 C
 chmod +x "$t/bin/curl"
+key=x CW_JEV=0 JEV_HIGH=90 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
+check "exported key cannot enable Jev when CW_JEV=0" '[ ! -e "$t/jev-called" ] && arg medium'
 CW_JEV=1 OPENROUTER_API_KEY=x JEV_HIGH=90 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
 check "Jev sure high (90%) stays high" 'arg high'
 CW_JEV=1 OPENROUTER_API_KEY=x JEV_HIGH=60 "$here/bin/cw" coder <<< "x" >/dev/null 2>&1
@@ -210,4 +229,4 @@ done
 unset CW_ACCEPT_FAIL_RE
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
-echo; [ $fails = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
+echo; [ $fails = 0 ] && echo "all passed (0 failures)" || { echo "$fails failed"; exit 1; }

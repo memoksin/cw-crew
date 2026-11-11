@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cw — run one headless Claude worker. Task on stdin, report on stdout, one meta line on stderr.
 #   cw scout|coder|reviewer [-M tier] [-C dir] [-W name [-K path]...] [-r session_id] [-t timeout_s] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-S schema.json] < task.md
-#   -S file: JSON Schema for the report (scout, coder; Claude tiers only). Meta line: schema=pass|FAIL; on pass the
+#   -S file: JSON Schema for the report (scout, coder). Meta line: schema=pass|FAIL; on pass the
 #     compact structured_output JSON is the last stdout line. FAIL makes an rc-0 run rc 1. Not persisted: pass it again on -r.
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
@@ -150,6 +150,11 @@ fi
 # luna, sol, astra run on Codex (ChatGPT plan quota) and need CW_CODEX=1, which also makes them the role defaults: scout
 # luna, coder and reviewer sol. They fall back to Claude (haiku/sonnet, astra: opus) when Codex is off or missing, the run
 # needs -a, or either limit window is at CW_CODEX_MAX percent used. A Claude session keeps resuming on Claude.
+prev=""; saved_model=""
+[ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
+if [ -z "$tier" ] && [ -n "$prev" ] && [ ! -f "$logdir/dirs/$resume.codex" ]; then
+  saved_model=$(jq -r '.model // empty' "${prev%.json}.meta" 2>/dev/null)
+fi
 if [ -z "$tier" ] && [ "${CW_CODEX:-0}" = 1 ] && [ ${#granted[@]} -eq 0 ] && { [ -z "$resume" ] || [ -f "$logdir/dirs/$resume.codex" ]; }; then
   [ "$role" = scout ] && tier=luna || tier=sol
 fi
@@ -190,17 +195,17 @@ if [ -n "$cdx" ]; then
   fi
 fi
 
+[ -n "$saved_model" ] && model=$saved_model
+
 # Effort: an explicit -e wins; a resume keeps the effort of the run it continues; otherwise, only with CW_JEV=1,
 # Jev picks it from the spec (OpenRouter decisions API, ~1 s, ~$0.00002; sends the first 20k chars of the task).
 # Jev must be sure (p >= CW_JEV_SURE %, default 70) to pick high; a less sure high runs at medium, since a run that
 # falls short is retried higher (on past runs this matched a blind review better: 23/26 vs 20/26).
 # Off or any failure: the role default.
-effort_src=flag; effort_p=""; effort_jev=""
+effort_src=flag; effort_p=""; effort_jev=""; key=""
 if [ "$effort" = auto ]; then
   [ "$role" = coder ] && effort=medium || effort=low
   effort_src=default
-  prev=""
-  [ -n "$resume" ] && prev=$(grep -rlF --include='*.json' "\"session_id\":\"$resume\"" "$logdir" 2>/dev/null | sort | tail -1)
   if [ -n "$prev" ] && [ -f "${prev%.json}.meta" ] && pe=$(jq -re '.effort // empty' "${prev%.json}.meta" 2>/dev/null); then
     effort=$pe; effort_src=resume
   elif [ "${CW_JEV:-0}" = 1 ] && key=${OPENROUTER_API_KEY:-$([ -n "${CW_JEV_KEYCHAIN:-}" ] && security find-generic-password -s "$CW_JEV_KEYCHAIN" -w 2>/dev/null)}; [ -n "${key:-}" ]; then
@@ -252,8 +257,9 @@ jq -nc --arg role "$role" --arg model "$model" --arg session "${CLAUDE_CODE_SESS
   --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
   --arg qhome "${cdx:+codex}" --arg bucket "${bucket:-}" --arg a5 "${cx5:-}" --arg aw "${cxw:-}" \
   --argjson hasq "$([ -n "$cdx" ] && echo 1 || echo 0)" \
+  --argjson acc "$([ -n "$accept" ] && echo true || echo false)" \
   '{name:$name,role:$role,model:$model,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
-  + (if $hasq == 1 then {quota: {home: $qhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null)}} else {} end)' \
+  + (if $hasq == 1 then {quota: {home: $qhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null)}} else {} end) + (if $acc then {accept:true} else {} end)' \
   > "$log.meta"
 # The pane polls live/ (one empty marker per running worker), not the whole run dir.
 live="$logdir/live/${log##*/}"; mkdir -p "$logdir/live"; : > "$live"
@@ -395,6 +401,7 @@ if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.sub
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
   again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept"); [ -n "$schema" ] && again+=(-S "$schema")
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
+  for ((i=1; i<${#adddirs[@]}; i+=2)); do again+=(-D "${adddirs[i]}"); done
   rm -f "$live"
   CW_AUTO_CONTINUE=$((left - 1)) CW_CONT=1 exec "$0" coder "${again[@]}" <<< "You hit the turn limit mid-task. Continue exactly where you stopped; do not redo finished work. Finish the task, run the acceptance commands, then send the full report the task asks for."
 fi
@@ -410,7 +417,10 @@ secs=$(( $(date +%s) - start ))
 if ! jq -e . "$log.json" >/dev/null 2>&1; then
   echo "$rc" > "$log.done"; rm -f "$live"
   echo "cw: worker produced no JSON (rc=$rc, 142 = timeout)"; tail -5 "$log.err"
-  echo "[cw $role $model rc=$rc ${secs}s log=$log.err]" >&2; exit $(( rc ? rc : 1 ))
+  sid=$(jq -sr 'map(select(.e=="init")) | last | .sid // empty' "$log.events" 2>/dev/null)
+  [ -n "$sid" ] && printf '%s\n' "$dir" > "$logdir/dirs/$sid"
+  [ -n "$sid" ] && [ -n "$cdx" ] && printf '%s\n' "$cdx" > "$logdir/dirs/$sid.codex"
+  echo "[cw $role $model rc=$rc${sid:+ sid=$sid} ${secs}s log=$log.err]" >&2; exit $(( rc ? rc : 1 ))
 fi
 jq -r '.result // "(no result: \(.subtype))"' "$log.json"
 acc=""; sch=""
