@@ -24,6 +24,9 @@ git check-ignore -q .crew/first
 [ -f "$wt/untracked.txt" ] && [ -f "$wt/cache/data" ]
 [ ! -e "$wt/.crew" ]
 [ -z "$("$here/bin/cwwt" diff first)" ]
+mkdir "$t/tmp"
+TMPDIR="$t/tmp" "$here/bin/cwwt" apply first
+[ -z "$(ls -A "$t/tmp")" ]
 printf 'worker\n' > "$wt/worker.txt"
 "$here/bin/cwwt" diff first | grep -q '^+worker'
 "$here/bin/cwwt" apply first
@@ -58,4 +61,23 @@ grep -qxF '/.crew/' .gitignore
 grep -qxF '/.crew/' "$wt/.gitignore"
 [ -z "$("$here/bin/cwwt" diff fresh)" ]
 "$here/bin/cwwt" rm fresh
+git add .gitignore && git commit -qm ignore
+"$here/bin/cwwt" create empty >"$t/empty.out" 2>"$t/empty.err"
+[ "$(cat "$t/empty.err")" = "cwwt: $PWD/.crew/empty (branch wt/empty, 0 ignored paths cloned)" ]
+"$here/bin/cwwt" rm empty
+git branch wt/broken
+printf 'lead\n' > a.txt
+git commit -qam lead
+printf 'dirty\n' > a.txt
+if "$here/bin/cwwt" create broken >"$t/broken.out" 2>"$t/broken.err"; then
+  echo 'FAIL: accepted failed carry'; exit 1
+fi
+[ ! -d .crew/broken ] && [ ! -e .crew/.broken.base ]
+git show-ref -q --verify refs/heads/wt/broken
+! git worktree list | grep -qF "$PWD/.crew/broken"
+mkdir .crew/broken
+if "$here/bin/cwwt" create broken >"$t/broken.out" 2>"$t/broken.err"; then
+  echo 'FAIL: reused incomplete worktree'; exit 1
+fi
+grep -qF 'cwwt rm broken' "$t/broken.err"
 echo 'all ok: cwwt default location, ignore, copy, diff, apply, reuse, lookup, cleanup and override'

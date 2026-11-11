@@ -32,7 +32,7 @@ snap() {
   local idx; idx=$(mktemp)
   cp "$(git -C "$wt" rev-parse --path-format=absolute --git-path index)" "$idx"
   GIT_INDEX_FILE=$idx git -C "$wt" add -A >/dev/null 2>&1 || { rm -f "$idx"; die "snapshot failed in $wt"; }
-  GIT_INDEX_FILE=$idx git -C "$wt" write-tree; rm -f "$idx"
+  GIT_INDEX_FILE=$idx git -C "$wt" write-tree || { rm -f "$idx"; die "snapshot failed in $wt"; }; rm -f "$idx"
 }
 
 case $cmd in
@@ -42,18 +42,24 @@ create)
   if [ "$root" = "$repo/.crew" ] && ! grep -qxF '/.crew/' "$repo/.gitignore" 2>/dev/null; then
     printf '\n/.crew/\n' >> "$repo/.gitignore" || die "could not ignore .crew"
   fi
-  if [ -d "$wt" ]; then echo "$wt"; exit 0; fi
+  if [ -d "$wt" ]; then
+    [ -f "$basef" ] || die "incomplete worktree $name; run cwwt rm $name"
+    echo "$wt"; exit 0
+  fi
   mkdir -p "$root" || die "could not create $root"
   if git -C "$repo" show-ref -q --verify "refs/heads/wt/$name"; then
     git -C "$repo" worktree add -q "$wt" "wt/$name" || die "worktree add failed"
   else
     git -C "$repo" worktree add -q -b "wt/$name" "$wt" HEAD || die "worktree add failed"
   fi
+  trap 'git -C "$repo" worktree remove --force "$wt"; rm -f "$basef"' EXIT
   # carry the lead's uncommitted work so the worker starts from what the lead sees
   if ! git -C "$repo" diff --quiet HEAD; then
     git -C "$repo" diff --binary HEAD | git -C "$wt" apply --binary || die "could not carry uncommitted changes"
   fi
-  (cd "$repo" && git ls-files -o --exclude-standard -z | tar --null -cf - -T - 2>/dev/null) | tar -xf - -C "$wt"
+  if [ -n "$(git -C "$repo" ls-files -o --exclude-standard)" ]; then
+    (cd "$repo" && git ls-files -o --exclude-standard -z | tar --null -cf - -T - 2>/dev/null) | tar -xf - -C "$wt"
+  fi
   list=()
   [ -f "$repo/.cw-copy" ] && while IFS= read -r l; do
     l=${l%%#*}; l=${l%"${l##*[![:space:]]}"}; [ -n "$l" ] && list+=("$l")
@@ -68,7 +74,8 @@ create)
       { cp -cR "$repo/$f" "$wt/$f" 2>/dev/null || cp -R "$repo/$f" "$wt/$f"; } && n=$((n + 1))   # -c = APFS clone
     done < <(git -C "$repo" ls-files -o -i --exclude-standard --directory -z -- "$p")
   done
-  snap > "$basef"
+  snap > "$basef" || die "could not save base for $name"
+  trap - EXIT
   echo "cwwt: $wt (branch wt/$name, $n ignored paths cloned)" >&2
   echo "$wt"
   ;;
@@ -81,7 +88,7 @@ apply)
   [ -f "$basef" ] || die "no base for $name"
   patch=$(mktemp); err=$(mktemp)
   git -C "$wt" diff --binary "$(cat "$basef")" "$(snap)" > "$patch"
-  [ -s "$patch" ] || { echo "cwwt: $name has no changes"; rm -f "$patch"; exit 0; }
+  [ -s "$patch" ] || { echo "cwwt: $name has no changes"; rm -f "$patch" "$err"; exit 0; }
   if git -C "$repo" apply --check --binary "$patch" 2>"$err"; then
     git -C "$repo" apply --binary "$patch" && git -C "$repo" apply --stat "$patch" | tail -1
     # next apply/diff only shows what comes after this
