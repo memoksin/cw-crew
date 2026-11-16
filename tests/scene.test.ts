@@ -408,3 +408,11 @@ test('a Codex worker shows its quota gauge and home on the card', () => {
   const plain = buildWorkers([{ id: 'p', meta: meta(), events: [{ e: 'init', t: T0 * 1000 + 100 }] }], now)
   expect(gauges(plain[0]!, now).map(g => g.name)).toEqual(['context', 'turns', 'time'])
 })
+
+test('a tool note shows what the worker is doing and clears on the next plain step', async () => {
+  const run = (events: Run['events']): Run => ({ id: 'n1', meta: meta({ role: 'coder' }), events })
+  const bash = { e: 'tool', tool: 'Bash', arg: 'npm test', note: 'Run unit tests', t: T0 * 1000 + 2000 }
+  expect(buildWorkers([run([{ e: 'init', t: T0 * 1000 }, bash])], T0 * 1000 + 2100)[0]?.note).toBe('Run unit tests')
+  const read = { e: 'tool', tool: 'Read', arg: 'a.ts', t: T0 * 1000 + 3000 }
+  expect(buildWorkers([run([{ e: 'init', t: T0 * 1000 }, bash, read])], T0 * 1000 + 3100)[0]).toMatchObject({ note: '', arg: 'a.ts' })
+})

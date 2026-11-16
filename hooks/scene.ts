@@ -10,6 +10,7 @@ export type State =
 
 export type Ev = {
   e: string; t: number; tool?: string; arg?: string
+  note?: string                                         // tool: the model's own few-word summary (Bash description)
   ok?: boolean; sub?: string; sid?: string; turns?: number; denied?: number; out?: number
   ctx?: number; mid?: string                            // assistant steps: context size, message id
   cost?: number; cin?: number; nin?: number; win?: number // result: USD, cached / new input tokens, context window
@@ -31,7 +32,7 @@ export type Run = { id: string; meta: Meta; events: Ev[]; rc?: number; doneAt?: 
 export type Worker = {
   key: string; role: Role; model: string; name: string; task: string; effort: string
   start: number; runStart: number; resumed: boolean
-  state: State; stateAt: number; arg: string; trail: Kind[]; times: number[]; lastAt: number; tmo: number
+  state: State; stateAt: number; arg: string; note: string; trail: Kind[]; times: number[]; lastAt: number; tmo: number
   blocked: number; question?: string; end?: number; turns: number; out: number
   runIds: string[]   // the chain's runs, oldest first: the detail view reads their files
   effortSrc: string; effortP: string; branch: string; wt: string; sid: string
@@ -67,7 +68,7 @@ export function parseEvents(text: string): Ev[] {
   return out
 }
 
-type RunView = Pick<Worker, 'state' | 'stateAt' | 'arg' | 'blocked' | 'end' | 'turns' | 'out' | 'lastAt'
+type RunView = Pick<Worker, 'state' | 'stateAt' | 'arg' | 'note' | 'blocked' | 'end' | 'turns' | 'out' | 'lastAt'
   | 'runTurns' | 'ctx' | 'win' | 'cost' | 'cin' | 'nin' | 'add' | 'del' | 'files' | 'accept'> & { trail: Kind[]; times: number[] }
 
 const ACCEPT_MS = 1_830_000   // cw's CW_ACCEPT_TMO default (1800 s) plus slack
@@ -75,7 +76,7 @@ const ACCEPT_MS = 1_830_000   // cw's CW_ACCEPT_TMO default (1800 s) plus slack
 export function runState(run: Run, now: number): RunView {
   const start = run.meta.start * 1000
   const trail: Kind[] = [], times: number[] = []
-  let arg = '', lastTool: Ev | undefined, lastDenied: Ev | undefined, lastError: Ev | undefined
+  let arg = '', note = '', lastTool: Ev | undefined, lastDenied: Ev | undefined, lastError: Ev | undefined
   let result: Ev | undefined, accept: Ev | undefined, accepted: Ev | undefined, blocked = 0
   let ctx = 0, add = 0, del = 0, files = 0
   const mids = new Set<string>()
@@ -85,6 +86,7 @@ export function runState(run: Run, now: number): RunView {
     if (ev.e === 'tool') {
       lastTool = ev
       arg = ev.arg ?? ''
+      note = ev.note ?? ''
       trail.push(kindOf(ev.tool ?? '', arg))
       times.push(ev.t)
     } else if (ev.e === 'denied') { lastDenied = ev; blocked++ }
@@ -98,7 +100,7 @@ export function runState(run: Run, now: number): RunView {
   }
   const lastAt = run.events[run.events.length - 1]?.t ?? start
   const base = {
-    arg, trail, times, blocked, lastAt, turns: result?.turns ?? 0, out: result?.out ?? 0,
+    arg, note, trail, times, blocked, lastAt, turns: result?.turns ?? 0, out: result?.out ?? 0,
     runTurns: result?.turns ?? mids.size, ctx, win: result?.win ?? 0, cost: result?.cost,
     cin: result?.cin ?? 0, nin: result?.nin ?? 0, add, del, files,
     accept: accepted ? { ok: accepted.ok !== false, rc: accepted.rc } : undefined,
@@ -510,9 +512,10 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
     if (w.accept && end - lx > 7) lx += 2 + g.text(lx + 2, row(1), w.accept.ok ? '✓ test' : '✗ test', ink(w.accept.ok ? GOOD : BAD))
   } else if (quiet > QUIET_MS && w.state === 'think') {
     g.text(lx, row(1), ` · quiet ${clock(quiet)}`, mix(WARN, CARD, 0.25 * pulse(now, 2000)), end - lx)
-  } else if (w.arg && w.state !== 'ask' && end - lx > 6) {
+  } else if ((w.note || w.arg) && w.state !== 'ask' && end - lx > 6) {
     lx += 1 + g.text(lx + 1, row(1), '·', FAINT)
-    target(g, lx + 1, row(1), w.arg, end - lx - 1, ink(0xc9d6e6), ink(0x6d7891))
+    if (w.note) g.text(lx + 1, row(1), w.note, ink(0xc9d6e6), end - lx - 1)
+    else target(g, lx + 1, row(1), w.arg, end - lx - 1, ink(0xc9d6e6), ink(0x6d7891))
   }
 
   // 3–4: the question while one waits; else the task, then the rhythm and what needs an eye
@@ -550,7 +553,7 @@ function line(g: Grid, w: Worker, x0: number, y: number, W: number, now: number)
   g.put(x, y, iconOf(w, Math.floor(now / FRAME_MS)), sc); x += 2
   x += g.text(x, y, w.name, themeOf(w), end - x)
   x += 1 + g.text(x + 1, y, LABEL[w.state], sc, end - x - 1)
-  const rest = w.state === 'ask' ? (w.question ?? '') : w.arg || w.task
+  const rest = w.state === 'ask' ? (w.question ?? '') : w.note || w.arg || w.task
   if (end - x > 4) g.text(x + 1, y, shorten(rest, end - x - 2), DIM)
 }
 

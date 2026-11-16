@@ -356,7 +356,8 @@ ev='fromjson? |
     (.message.usage // {} | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)) as $ctx
     | (.message.id // "" | .[-8:]) as $mid | .message.content[]? |
     (if .type=="tool_use" then {e:"tool",tool:.name,
-      arg:((.input.file_path // .input.path // .input.command // .input.pattern // .input.query // .input.url // "")|tostring|.[0:120])}
+      arg:((.input.file_path // .input.path // .input.command // .input.pattern // .input.query // .input.url // "")|tostring|.[0:120]),
+      note:((.input.description // "")|tostring|.[0:60])} | if .note=="" then del(.note) else . end
     elif .type=="thinking" then {e:"think"} elif .type=="text" then {e:"text"} else empty end) | .ctx=$ctx | .mid=$mid
   elif .type=="user" then .message.content[]? | select(.type=="tool_result") |
     {e:(if .is_error then (if (.content|tostring|test("permission|denied|not allowed";"i")) then "denied" else "error" end) else "ok" end)}
