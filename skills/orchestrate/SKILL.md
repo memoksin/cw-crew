@@ -44,7 +44,7 @@ Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, cod
 - Limit or full context mid-run with no file changes: cw reruns on Claude. A coder with file changes stops with `usage_limit` or `context_limit`: give that tree to a fresh Sonnet worker. Check every `-T` result yourself.
 - Needs more than the window (huge logs, a whole-repo read): use a Claude tier (1M).
 - Sandbox: coders write only in the work dir. Network, `.git` and other processes are blocked, and a blocked call cannot be approved, so a coder that needs the network or `-a` goes to `sonnet`. `rm -rf` inside the work dir is not blocked: use `-W` on an important repo.
-- Reads are open disk-wide except `CW_CODEX_DENY` and `CW_CODEX_DENY_GLOBS`. Tasks and the files workers read go to OpenAI.
+- Reads: both providers share one deny list (credential dirs, secret globs, `CW_DENY`, `CW_DENY_GLOBS`). `CW_CODEX_ONLY_DENY` keeps paths (personal data) away from Codex only. Tasks and the files workers read go to OpenAI.
 - No turn limit on Codex: only `-t` stops a loop. No image reading: visual review stays on Claude.
 
 ## Claude tiers (`-M`)
@@ -59,7 +59,7 @@ Pick the lowest tier likely to get it right on the first try.
 
 - Defaults: scout `haiku` (`luna` with `CW_CODEX=1`), coder `sonnet`. Always pass `-M` for coders.
 - Do not hold back tiers 2-3 when the task needs them: a failed cheap run plus a retry costs more than one right run.
-- Failed or weak result: rerun one tier up with what went wrong.
+- Failed or weak result, escalation ladder: (1) make sure a runnable `-T` check exists, (2) raise effort one level (`-X` does this once on its own), (3) move one model up at a lower effort, (4) the same failure twice: replan or split the task, do not climb further.
 
 ### Opus coder (rare, expensive)
 
@@ -139,6 +139,8 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 - Call it after a coder ends `DONE` with `accept=pass`, and only when the diff is risky: auth, permissions, secrets or input validation; money; deleting or migrating data; concurrency or caching; a public API or file format others parse; 3+ files or ~150+ changed lines; or a spec with a rules file (security list, project standards).
 - Skip it: one-line fixes, docs, renames, tests-only changes, a diff you read fully in under a minute, and any run whose tests still fail (fix first; review last).
 - Pass the same spec files the coder got, and the rule lists that matter (`specs/security.md`). Expertise goes in spec files, not new roles.
+- Every finding is labeled `[Important]`, `[Nit]` (max 3) or `[Pre-existing]`. Act on Important; take Nits if cheap; Pre-existing goes to the user, not the coder.
+- A second round: pass the first round's findings with `-p file` so the reviewer checks them and does not re-raise them. Stop after 3 rounds and decide yourself.
 - `BLOCKER` → resume the coder with those lines (`-r <sid>`), then verify yourself. Do not re-review a small fix; a second review only when the fix rewrote the change.
 - `SUGGEST` → take what is cheap and right, drop the rest. `UNSURE` → check it yourself before acting.
 - Cost: one reviewer per diff, ~3k cold start plus the diff, usually under 5 turns (limit 20). Never resume a reviewer for a new diff: a fresh one is cheaper and keeps its context clean. Default effort `low`; `-e medium` for security or data-loss risk.
@@ -157,7 +159,9 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 
 - Do it yourself: one grep, one known small file, a one-line fix, git, anything shorter than writing the spec.
 - Delegate: reading more than ~3 files or ~500 lines, web research, any feature or multi-file change, test-fix loops.
-- Workers start without CLAUDE.md, skills or MCP. Put every project fact they need in the spec.
+- Workers start without skills or MCP. cw inlines the repo's AGENTS.md (else CLAUDE.md) as project rules (`CW_RULES=0` turns it off). Put task facts in the spec.
+- Workers may read the whole repo; name the files they may write. Your file guesses can be wrong, and callers must be seen.
+- Contract text scales with the level: level 1 gets the most explicit steps, level 3 the least. Write level-1 specs with exact paths and checks.
 - A project rule that tells the lead to do a task itself (e.g. a quality gate) wins.
 
 ## Task spec
@@ -178,6 +182,7 @@ cw reviewer <<< "Focus: the migration."                         # uncommitted ch
 
 - Default `-e auto`: role default (scout and reviewer `low`, coder `medium`), or Jev picks it from the spec when `CW_JEV=1` (opt-in, sends the task to OpenRouter; setup: README; `high` only when Jev is sure, `CW_JEV_SURE`). A resume keeps the effort of the run it continues.
 - Override with `-e low|medium|high` only for a known reason: a fix-up after a failed attempt → `-e high`.
+- `-X` (or `CW_ESCALATE=1`): a coder whose `-T` fails is resumed once at effort +1 (max high) with the failure output. Cheap default for test-backed work: start low or medium, let failures climb.
 - Never xhigh/max for workers: work that needs it, Opus does itself.
 
 ## Worker questions (rc=3)
