@@ -345,18 +345,10 @@ export const register: Register = on => {
       const cols = Math.max(46, Math.min(terminal ? 512 : 138, e.props.bodyColumns))
       let hero
       if (e.surface === 'terminal') {
-        const { Image, Raster } = $.ui.resolve(e)
-        const d = drawDetail(open, cols, now, images)
-        hero = (
-          <Box width={cols} height={d.rows}>
-            <Raster key="detail" columns={cols} rows={d.rows} cells={encode(d.words)} />
-            {d.spots.map(s => (
-              <Box position="absolute" top={s.y} left={s.x} width={SPRITE_COLS} height={SPRITE_ROWS} backgroundColor={css(CARD)}>
-                <Image key={`d${s.key}`} source={imageSource(s.look, $.plugin.root)} columns={SPRITE_COLS} rows={SPRITE_ROWS} alt={s.alt} />
-              </Box>
-            ))}
-          </Box>
-        )
+        // Half-block sprites, not Image: the detail body scrolls (long reports), and a terminal image does not move with it.
+        const { Raster } = $.ui.resolve(e)
+        const d = drawDetail(open, cols, now, false)
+        hero = <Raster key="detail" columns={cols} rows={d.rows} cells={encode(d.words)} />
       } else {
         const { Svg } = $.ui.resolve(e)
         hero = <Svg key="detail" source={await svgOf($, im => drawDetail(open, cols, now, im), cols)} alt={`${open.name} ${LABEL[open.state]}`} />
