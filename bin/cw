@@ -498,12 +498,17 @@ deny=$(jq -nc --arg p "$denyl" --arg g "$denygl" --arg h "$HOME" --argjson coder
 # Same box as Codex: Bash runs in Claude Code's OS sandbox (network off, writes only in the work dir, the deny
 # list unreadable). Its denyRead takes no globs, so the secret globs become the matching files under the work dir.
 # A granted Bash(cmd) runs outside the sandbox: the lead approved that exact call.
+# Temp dirs and build/tool caches stay writable (test logs in /tmp, SwiftPM and Godot caches); CW_SANDBOX_WRITE adds more.
+# SwiftPM nests its own sandbox and signs entitlements, which fail inside ours: those builds run outside (CW_SANDBOX_EXCLUDE).
+sbx_ex=${CW_SANDBOX_EXCLUDE-swift build:swift build *:swift test:swift test *}
+sbw="/tmp:/private/tmp:${TMPDIR:-/tmp}:$HOME/Library/Caches:$HOME/.cache:$HOME/Library/Developer:$HOME/Library/Application Support/Godot:${CW_SANDBOX_WRITE:-}"
 sbx=$(cd "$dir" 2>/dev/null && { printf '%s\n' "$denyl" | tr ':' '\n'
   IFS=: read -ra gl <<< "$denygl"; nm=(); for x in "${gl[@]}"; do [[ $x == '**/'* && ${x#'**/'} != */* ]] && nm+=(-o -name "${x#'**/'}"); done
   [ ${#nm[@]} -gt 0 ] && find "$PWD" -maxdepth 6 \( -name node_modules -o -name .git \) -prune -o -type f \( "${nm[@]:1}" \) -print 2>/dev/null; } |
-  jq -Rsc --arg g "$(printf '%s\n' "${granted[@]+"${granted[@]}"}")" '{enabled:true, autoAllowBashIfSandboxed:true, allowUnsandboxedCommands:false,
-    filesystem:{denyRead:(split("\n") | map(select(. != "") | rtrimstr("/")) | unique)},
-    excludedCommands:($g | split("\n") | map(select(startswith("Bash(") and endswith(")")) | .[5:-1]))}')
+  jq -Rsc --arg g "$(printf '%s\n' "${granted[@]+"${granted[@]}"}")" --arg w "$sbw" --arg x "$sbx_ex" '{enabled:true, autoAllowBashIfSandboxed:true, allowUnsandboxedCommands:false,
+    filesystem:{denyRead:(split("\n") | map(select(. != "") | rtrimstr("/")) | unique),
+      allowWrite:($w | split(":") | map(select(. != "") | rtrimstr("/")) | unique)},
+    excludedCommands:(($g | split("\n") | map(select(startswith("Bash(") and endswith(")")) | .[5:-1])) + ($x | split(":") | map(select(. != ""))))}')
 [ -n "$sbx" ] || sbx='{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}'
 sp="$sp Your shell runs in an OS sandbox: the network is off, writes outside the work dir fail, and denied files read as \"Operation not permitted\". Do not work around it. If the task truly needs one blocked command (network, a write elsewhere), stop and end with PERMISSION: Bash(<exact command>) -- why."
 sp="$sp Never read or list credential or secret files: ~/.ssh, ~/.aws, ~/.gnupg, .env files, private keys and certificates, or paths the user denied. Reads there are blocked; do not try them through Bash (cat, grep, cp) either."

@@ -59,7 +59,7 @@ check "diff inlined: tracked change" 'grep -q "^+TWO" "$t/prompt" && grep -qF "<
 check "diff inlined: untracked file" 'grep -q "^+++ b/b.txt" "$t/prompt"'
 check "spec and task inlined" 'grep -q "Spec: keep two lines." "$t/prompt" && grep -q "Check the rename." "$t/prompt"'
 check "default model Sonnet, effort low" 'arg claude-sonnet-5-5 && arg low'
-check "read-only tools, dontAsk, no web" 'arg Read,Bash && arg dontAsk && ! grep -qE "Edit|Write|WebFetch|WebSearch" "$t/args"'
+check "read-only tools, dontAsk, no web" 'arg Read,Bash && arg dontAsk && ! grep -qwE "Edit|Write|WebFetch|WebSearch" "$t/args"'
 check "short turn limit" 'arg 20'
 check "live marker gone once the run is done" '[ -d "$CW_LOG_DIR/live" ] && [ -z "$(ls -A "$CW_LOG_DIR/live")" ]'
 check "meta file records role reviewer" 'jq -e "select(.role==\"reviewer\")" "$CW_LOG_DIR"/*-reviewer-*.meta >/dev/null'
@@ -217,7 +217,7 @@ check "CW_CODEX_ONLY_DENY and CW_CODEX_DENY stay out of the Claude settings" '! 
 mkdir -p "$t/sbx/a/node_modules" && touch "$t/sbx/fake.secret" "$t/sbx/a/fake.secret" "$t/sbx/a/node_modules/fake.secret" "$t/sbx/ok.txt"
 rm -f "$t/args"; CW_DENY="$t/shared" CW_DENY_GLOBS='**/fake.secret' CW_CODEX_ONLY_DENY="$t/cxonly" "$here/bin/cw" coder -C "$t/sbx" -a 'Bash(curl -s https://x.test)' <<< "x" >/dev/null 2>&1
 sbx=$(grep -m1 '^{"language"' "$t/args" | jq -c .sandbox)
-check "Claude sandbox: on, no unsandboxed retry, denies the list and glob matches in the work dir, grants run outside" 'jq -e --arg h "$HOME" --arg t "$t" ".enabled and .autoAllowBashIfSandboxed and (.allowUnsandboxedCommands == false) and (.filesystem.denyRead | index(\$h + \"/.ssh\") != null and index(\$t + \"/shared\") != null and (map(endswith(\"sbx/fake.secret\")) | any) and (map(endswith(\"a/fake.secret\")) | any) and (map(test(\"node_modules|ok.txt|cxonly\")) | any | not)) and .excludedCommands == [\"curl -s https://x.test\"]" <<< "$sbx" >/dev/null && grep -q "PERMISSION: Bash(<exact command>)" "$t/args"'
+check "Claude sandbox: on, no unsandboxed retry, denies the list and glob matches in the work dir, grants run outside" 'jq -e --arg h "$HOME" --arg t "$t" ".enabled and .autoAllowBashIfSandboxed and (.allowUnsandboxedCommands == false) and (.filesystem.denyRead | index(\$h + \"/.ssh\") != null and index(\$t + \"/shared\") != null and (map(endswith(\"sbx/fake.secret\")) | any) and (map(endswith(\"a/fake.secret\")) | any) and (map(test(\"node_modules|ok.txt|cxonly\")) | any | not)) and (.filesystem.allowWrite | index(\"/tmp\") != null and index(\$h + \"/Library/Caches\") != null) and .excludedCommands[0] == \"curl -s https://x.test\" and (.excludedCommands | index(\"swift test *\") != null)" <<< "$sbx" >/dev/null && grep -q "PERMISSION: Bash(<exact command>)" "$t/args"'
 rm -f "$t/args"; CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -a 'Bash(ls)' <<< "x" >/dev/null 2>&1
 check "-a keeps the run on Claude" 'arg claude-sonnet-5-5'
 rm -f "$t/args"; CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"
