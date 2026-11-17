@@ -176,7 +176,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       conts: (prev?.conts ?? 0) + (run.meta.cont ? 1 : 0),
       // A resume continues the same conversation: until its first step the context is the last run's.
       ctx: view.ctx || prev?.ctx || 0,
-      win: view.win || prev?.win || windows.get(run.meta.model) || (/\[1m\]/i.test(run.meta.model) ? 1_000_000 : 200_000),
+      win: view.win || prev?.win || windows.get(run.meta.model) || defaultWindow(run.meta.model),
       cost: prev?.cost === undefined && view.cost === undefined ? undefined : (prev?.cost ?? 0) + (view.cost ?? 0),
       cin: (prev?.cin ?? 0) + view.cin, nin: (prev?.nin ?? 0) + view.nin,
       add: (prev?.add ?? 0) + view.add, del: (prev?.del ?? 0) + view.del, files: (prev?.files ?? 0) + view.files,
@@ -439,6 +439,15 @@ export type Hit = { key: string; x: number; y: number; label: string; color: num
 const iconOf = (w: Worker, f: number) =>
   w.state === 'done' ? '✓' : w.state === 'failed' ? '✗' : w.state === 'ask' ? '?'
   : w.state === 'blocked' || w.state === 'error' ? '!' : SPIN[f % SPIN.length] ?? ' '
+// Window by model name, used only when no run has reported a real one (`result.win` wins).
+export const defaultWindow = (model: string): number => {
+  const m = model.toLowerCase()
+  if (/\[1m\]/.test(m) || /claude-[a-z]+-5-5|fable-5-|^(haiku|sonnet|opus|fable)$/.test(m)) return 1_000_000
+  if (/gpt-6\.1-sol/.test(m)) return 475_000
+  if (/gpt-6-(luna|astra)/.test(m)) return 258_000
+  return 200_000
+}
+
 const themeOf = (w: Worker) => (/opus/i.test(w.model) ? OPUS_THEME : THEME[w.role])
 
 function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number, place: Place, hits?: Hit[]) {

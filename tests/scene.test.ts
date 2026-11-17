@@ -416,3 +416,20 @@ test('a tool note shows what the worker is doing and clears on the next plain st
   const read = { e: 'tool', tool: 'Read', arg: 'a.ts', t: T0 * 1000 + 3000 }
   expect(buildWorkers([run([{ e: 'init', t: T0 * 1000 }, bash, read])], T0 * 1000 + 3100)[0]).toMatchObject({ note: '', arg: 'a.ts' })
 })
+
+test('the context window falls back to a per-model default, and a real one from the run wins', async () => {
+  const run = (model: string, win?: number): Run => ({
+    id: model, meta: meta({ role: 'coder', model }),
+    events: [{ e: 'init', sid: 's-' + model, t: T0 * 1000 }, { e: 'tool', tool: 'Read', arg: 'a.ts', ctx: 1000, mid: 'm1', t: T0 * 1000 + 10 },
+      ...(win ? [{ e: 'result' as const, ok: true, sid: 's-' + model, turns: 1, win, t: T0 * 1000 + 20 }] : [])],
+  })
+  const win = (model: string, w?: number) => buildWorkers([run(model, w)], (T0 + 5) * 1000)[0]?.win
+  for (const m of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet[1m]']) expect(win(m)).toBe(1_000_000)
+  expect(win('gpt-6.1-sol')).toBe(475_000)
+  expect(win('gpt-6-luna')).toBe(258_000)
+  expect(win('gpt-6-astra')).toBe(258_000)
+  expect(win('gpt-6.1-terra')).toBe(200_000)
+  expect(win('sonnet')).toBe(1_000_000)
+  expect(win('claude-3-old')).toBe(200_000)
+  expect(win('claude-sonnet-5-5', 123_000)).toBe(123_000)
+})
