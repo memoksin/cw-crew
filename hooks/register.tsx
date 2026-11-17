@@ -446,8 +446,7 @@ export const register: Register = on => {
     const { rows, words, spots, hits } = drawScene(workers, cols, await $.clock.now(), maxRows, images, totals)
     mounted = { cols, rows, maxRows, images, keys: new Set(spots.map(s => s.key)) }
     const raster = <Raster key="crew" columns={cols} rows={rows} cells={encode(words)} />
-    // Each card's top row (up to its clock) is a Button drawn with the same cells: a click opens its detail view.
-    // Buttons hold text only, and paint() refreshes the raster but not them, so they cover no live cells.
+    // Each card's name is a Button drawn with the same cells: a click opens its detail view.
     // Not `h`: JSX compiles to the global h(), which a parameter of that name would shadow.
     const buttons = hits.map(hit => {
       const runs: { s: string; fg: number; bg: number }[] = []

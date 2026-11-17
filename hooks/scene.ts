@@ -465,7 +465,7 @@ function panel(g: Grid, x0: number, y0: number, W: number, H: number) {
 }
 
 type Place = (look: Look, x: number, y: number, alt: string) => void
-// A card's top row up to its clock (name, model, effort: no live cells): a Button over it opens the detail view.
+// A card's name: a Button over it opens the detail view. Raster cells take no press yet, and a Button inverts under the pointer, so it stays name-sized.
 export type Hit = { key: string; x: number; y: number; w: number; h: number; label: string; color: number }
 
 const iconOf = (w: Worker, f: number) =>
@@ -523,7 +523,7 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
   const clockX = R - 1 - elapsed.length
   g.text(clockX, row(0), elapsed, over ? ink(DIM) : TEXT)
   let x = X + g.text(X, row(0), w.name, ink(theme), clockX - X - 1)
-  hits?.push({ key: w.key, x: X, y: row(0), w: clockX - X - 1, h: 1, label: w.name, color: ink(theme) })
+  hits?.push({ key: w.key, x: X, y: row(0), w: Math.min([...w.name].length, clockX - X - 1), h: 1, label: w.name, color: ink(theme) })
   const room = () => clockX - x - 2
   if (room() > 7) x += 1 + g.text(x + 1, row(0), modelLabel(w.model, w.provider), ink(DIM), room() - 1)
   // the quota home next to the model, dropped first when narrow

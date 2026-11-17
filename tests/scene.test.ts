@@ -179,7 +179,7 @@ test('each card gets a details button over its name, inside the card', async () 
   for (const h of hits) {
     expect(h.y).toBeLessThan(rows)
     expect(h.x + h.label.length).toBeLessThan(cols)
-    expect(h.w).toBeGreaterThan(h.label.length)   // the top row up to the clock, not just the name
+    expect(h.w).toBe(h.label.length)   // the name, drawn in the card
     expect(h.h).toBe(1)
   }
 })
