@@ -416,7 +416,7 @@ test('a Codex worker shows its quota gauge and home on the card', () => {
   const now = T0 * 1000 + 1000
   const ws = buildWorkers([run], now)
   const q = gauges(ws[0]!, now)[0]!
-  expect([q.name, q.value, q.note]).toEqual(['quota', 'gpt 94%', 'codex: 5h 94% · wk 97%'])
+  expect([q.name, q.value, q.note]).toEqual(['quota', '94% left', 'codex: 5h 94% · wk 97%'])
   expect(Math.round(q.f * 100)).toBe(6)
   const at = (words: Uint32Array) => String.fromCodePoint(...Array.from({ length: words.length / 3 }, (_, i) => words[i * 3] ?? 32))
   expect(at(drawScene(ws, 120, now).words)).toContain('· codex')
@@ -487,4 +487,24 @@ test('a tool stays the state until its result arrives, then falls back to thinki
   expect(runState(run, T0 * 1000 + 40_000).state).toBe('bash')
   run.events.push({ e: 'ok', t: T0 * 1000 + 41_000 })
   expect(runState(run, T0 * 1000 + 50_000).state).toBe('think')
+})
+
+test('a failed card says why; quota never drives the worst gauge; the worst gauge is always shown', () => {
+  const t = T0 * 1000
+  const mk = (over: Partial<Run>, evs: Run['events'] = [{ e: 'init', t: t + 100 }]): Run => ({ id: 'f', meta: meta(), events: evs, ...over })
+  const text = (words: Uint32Array) => String.fromCodePoint(...Array.from({ length: words.length / 3 }, (_, i) => words[i * 3] ?? 32))
+  const why = (run: Run) => {
+    const w = buildWorkers([run], t + 5000)[0]!
+    const txt = text(drawScene([w], 120, t + 5000).words)
+    return [w.state, txt]
+  }
+  expect(why(mk({ rc: 142 }))[1]).toContain('timed out')
+  expect(why(mk({ rc: 137 }))[1]).toContain('killed')
+  expect(why(mk({ rc: 1 }, [{ e: 'result', ok: false, sub: 'error_max_turns', t: t + 200 }]))[1]).toContain('turn limit')
+  expect(why(mk({ rc: 0 }, [{ e: 'result', ok: true, t: t + 200 }, { e: 'accept_end', ok: false, t: t + 300 }]))[1]).toContain('test failed')
+  const quota = { home: 'codex', bucket: 'codex', five: 5, week: 90 }
+  const live = buildWorkers([{ id: 'q', meta: meta({ quota }), events: [{ e: 'init', t: t + 100 }, { e: 'tool', tool: 'Read', arg: 'a', t: t + 1900 }] }], t + 2000)[0]!
+  const txt = text(drawScene([live], 120, t + 2000).words)
+  expect(txt).not.toContain('gpt')
+  expect(txt).toMatch(/(ctx|turns|time) /)
 })

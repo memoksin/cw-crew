@@ -42,6 +42,7 @@ export type Worker = {
   cost?: number; cin: number; nin: number
   add: number; del: number; files: number
   accept?: { ok: boolean; rc?: number }
+  rc?: number; sub?: string   // how it ended: exit code, result subtype
   quota?: QuotaMeta
 }
 
@@ -70,7 +71,7 @@ export function parseEvents(text: string): Ev[] {
 }
 
 type RunView = Pick<Worker, 'state' | 'stateAt' | 'arg' | 'note' | 'blocked' | 'end' | 'turns' | 'out' | 'lastAt'
-  | 'runTurns' | 'ctx' | 'win' | 'cost' | 'cin' | 'nin' | 'add' | 'del' | 'files' | 'accept'> & { trail: Kind[]; times: number[] }
+  | 'runTurns' | 'ctx' | 'win' | 'cost' | 'cin' | 'nin' | 'add' | 'del' | 'files' | 'accept' | 'rc' | 'sub'> & { trail: Kind[]; times: number[] }
 
 const ACCEPT_MS = 1_830_000   // cw's CW_ACCEPT_TMO default (1800 s) plus slack
 
@@ -111,6 +112,7 @@ export function runState(run: Run, now: number): RunView {
     runTurns: result?.turns ?? mids.size, ctx, win: result?.win ?? 0, cost: result?.cost,
     cin: result?.cin ?? 0, nin: result?.nin ?? 0, add, del, files,
     accept: accepted ? { ok: accepted.ok !== false, rc: accepted.rc } : undefined,
+    rc: run.rc, sub: result?.sub,
   }
   // cw auto-continues a turn-limited run without writing .done: that result is not the end
   const continuing = result?.sub === 'error_max_turns' && run.rc === undefined
@@ -292,6 +294,10 @@ export class Grid {
 export const encode = (words: Uint32Array): string =>
   (new Uint8Array(words.buffer) as Uint8Array & { toBase64(): string }).toBase64()
 
+// Why a failed card failed, in two words
+export const failWhy = (w: Pick<Worker, 'rc' | 'sub' | 'accept'>) =>
+  w.rc === 142 ? 'timed out' : w.rc === 137 ? 'killed' : w.sub === 'error_max_turns' ? 'turn limit'
+  : w.accept?.ok === false ? 'test failed' : 'failed'
 export const LABEL: Record<State, string> = {
   boot: 'waking up', resumed: 'answered', think: 'thinking', read: 'reading', write: 'writing',
   bash: 'command', web: 'on the web', test: 'testing', blocked: 'blocked', error: 'error', ask: 'asking',
@@ -307,7 +313,7 @@ const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // The pane paints its own background and each worker is a filled card on it. The sprite frames are
 // transparent: an Image's box shows one colour even where the terminal letterboxes it (tall cells).
 export const PANE = 0x111122, CARD = 0x222233
-const TEXT = 0xe6e6f0, DIM = 0x8a8fa3, FAINT = 0x4d5162
+const TEXT = 0xe6e6f0, TASK = 0xb4b9cc, DIM = 0x8a8fa3, FAINT = 0x4d5162
 // Budgets read as memobar's do: under half green, to 80% yellow, from 80% red.
 const GOOD = 0x7bd88f, WARN = 0xffd166, BAD = 0xff5c5c
 export const level = (f: number) => (f >= 0.8 ? BAD : f >= 0.5 ? WARN : GOOD)
@@ -317,7 +323,7 @@ const QUIET_MS = 45_000
 
 export const CARD_H = 6
 const HEADER_H = 2
-const EMPTY_H = 8
+const EMPTY_H = 9
 
 export const perRow = (cols: number) => Math.max(1, Math.min(3, Math.floor(cols / 46)))
 
@@ -410,7 +416,7 @@ export function gauges(w: Worker, now: number): Gauge[] {
     const left = Math.min(q.five ?? 100, q.week ?? 100)
     const tag = /^codex/i.test(q.bucket) ? 'gpt' : 'cl'
     const win = [q.five !== null && `5h ${q.five}%`, q.week !== null && `wk ${q.week}%`].filter(Boolean).join(' · ')
-    return [{ name: 'quota', short: `${tag}`, f: 1 - left / 100, value: `${tag} ${left}%`, note: `${q.home}${win ? `: ${win}` : ''}` }]
+    return [{ name: 'quota', short: `${tag}`, f: 1 - left / 100, value: `${left}% left`, note: `${q.home}${win ? `: ${win}` : ''}` }]
   })()
   return [
     ...quota,
@@ -419,7 +425,8 @@ export function gauges(w: Worker, now: number): Gauge[] {
     { name: 'time', short: 'time', f: ms / tmo, value: w.end !== undefined ? clock(ms) : `${clock(tmo - ms)} left`, note: `of ${clock(tmo)}` },
   ]
 }
-const worst = (gs: Gauge[]) => gs.reduce((a, b) => (b.f > a.f ? b : a))
+// Quota is the account's, not the run's: it never drives a card's worst gauge.
+const worst = (gs: Gauge[]) => gs.filter(x => x.name !== 'quota').reduce((a, b) => (b.f > a.f ? b : a))
 
 const BARS = '▂▃▅▆▇'
 // Tools per BUCKET_MS bucket, newest on the right, each bar in the colour of its last tool's kind:
@@ -515,8 +522,7 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
   let x = X + g.text(X, row(0), w.name, ink(theme), clockX - X - 1)
   hits?.push({ key: w.key, x: X, y: row(0), label: w.name, color: ink(theme) })
   const room = () => clockX - x - 2
-  if (room() > 2) x += g.text(x, row(0), ' ›', ink(DIM), room())
-  if (room() > 7) x += 2 + g.text(x + 2, row(0), modelLabel(w.model, w.provider), ink(DIM), room() - 2)
+  if (room() > 7) x += 1 + g.text(x + 1, row(0), modelLabel(w.model, w.provider), ink(DIM), room() - 1)
   // the quota home next to the model, dropped first when narrow
   const ahome = w.quota?.home
   if (ahome && room() > 10 + [...ahome].length) x += 1 + g.text(x + 1, row(0), `· ${ahome}`, ink(FAINT), room() - 1)
@@ -526,13 +532,13 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
     for (let i = 0; i < 3; i++) g.put(x + i, row(0), i < eff[0] ? '●' : '○', i < eff[0] ? ink(eff[1]) : mix(FAINT, CARD, 0.3))
     x += 3
     // ✦: Jev chose the effort, not the role default
-    if (w.effortSrc === 'jev' && room() > 1) x += g.text(x, row(0), '✦', ink(JEV))
+    if (w.effortSrc === 'jev' && room() > 1) x += g.text(x, row(0), room() > 5 ? ' jev' : '✦', ink(JEV))
   }
   if (w.resumed && room() > 2) g.put(x + 1, row(0), '↻', ink(0xffe082))
 
   // 2: what it is doing now and on what; once over, what it left behind
   g.put(X, row(1), iconOf(w, f), ink(sc))
-  let lx = X + 2 + g.text(X + 2, row(1), LABEL[w.state], ink(sc), TW - 2)
+  let lx = X + 2 + g.text(X + 2, row(1), w.state === 'failed' ? failWhy(w) : LABEL[w.state], ink(sc), TW - 2)
   const end = X + TW
   const quiet = !w.end ? now - w.lastAt : 0
   if (over) {
@@ -551,18 +557,19 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
 
   // 3–4: the question while one waits; else the task, then the rhythm and what needs an eye
   if (w.state === 'ask' && w.question) {
-    wrap(w.question, TW, 2).forEach((line, i) => g.text(X, row(2 + i), line, 0xffe8a3))
+    wrap(w.question, TW, 1).forEach(line => g.text(X, row(2), line, 0xffe8a3))
+    wrap(w.task, TW, 1).forEach(line => g.text(X, row(3), line, TASK))
     return
   }
   let tx = X
   if (wtShown(w) && TW > 20) tx += 2 + g.text(X, row(2), `⎇ ${wtShown(w)}`, ink(BRANCH), 16)
-  wrap(w.task, X + TW - tx, 1).forEach(line => g.text(tx, row(2), line, ink(DIM)))
+  wrap(w.task, X + TW - tx, 1).forEach(line => g.text(tx, row(2), line, ink(TASK)))
 
   const flags: [string, number][] = []
   if (over) flags.push([w.cost !== undefined ? usd(w.cost) : `${w.turns} turns`, ink(DIM)])
   else {
     if (w.blocked) flags.push([`! ${w.blocked}`, 0xff9e9e])
-    if (top.f >= 0.5) flags.push([`${top.short} ${top.value}`, level(top.f)])
+    flags.push([`${top.short} ${top.value}`, top.f >= 0.5 ? level(top.f) : ink(DIM)])
   }
   let rx = X + TW
   for (const [s, c] of flags.reverse()) {
@@ -583,7 +590,7 @@ function line(g: Grid, w: Worker, x0: number, y: number, W: number, now: number)
   let x = x0 + 1
   g.put(x, y, iconOf(w, Math.floor(now / FRAME_MS)), sc); x += 2
   x += g.text(x, y, w.name, themeOf(w), end - x)
-  x += 1 + g.text(x + 1, y, LABEL[w.state], sc, end - x - 1)
+  x += 1 + g.text(x + 1, y, w.state === 'failed' ? failWhy(w) : LABEL[w.state], sc, end - x - 1)
   const rest = w.state === 'ask' ? (w.question ?? '') : w.note || w.arg || w.task
   if (end - x > 4) g.text(x + 1, y, shorten(rest, end - x - 2), DIM)
 }
@@ -667,6 +674,8 @@ export function drawScene(
       g.text(Math.max(0, i * slot + Math.floor((slot - label.length) / 2)), HEADER_H + 1 + MH, label, dim(THEME[role], 0.8))
     }
     const msg = 'no workers · /orchestrate wakes them'
+    const key = '↻ resumed · ✦ jev effort · ▂▅▇ activity · 5h ~N% of the 5h limit'
+    g.text(Math.max(0, Math.floor((cols - [...key].length) / 2)), HEADER_H + MH + 3, key, FAINT)
     g.text(Math.max(0, Math.floor((cols - [...msg].length) / 2)), HEADER_H + MH + 2, msg, FAINT)
     return { rows, words: g.words(), spots, hits }
   }

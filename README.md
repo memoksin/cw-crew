@@ -51,6 +51,7 @@ Update later with `winget upgrade --all` and `claude plugin update cw-crew@cw-cr
 - macOS, Linux or Windows, bash. On Windows: Git for Windows and `jq`, see [Windows](#windows).
 - `claude`, `jq`, `perl`, `git` on PATH. `rg` and `fd` help scouts but are optional.
 - Right-side pane: fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1`, outside tmux) and ≥110 columns. Otherwise it sits above the prompt. Sprites need a terminal with an image protocol; others get half-blocks.
+- Pane legend: `↻` resumed or continued · `✦`/`jev` effort chosen by Jev · the sparkline is recent activity · header `5h ~N%` is the share of the 5-hour limit used.
 - Claude desktop app (Code tab): the same pane and PNG sprites, drawn as one SVG; a `details ›` button per worker sits under it. Install the plugin from a terminal at user scope; the desktop session loads it.
 
 ## Use
