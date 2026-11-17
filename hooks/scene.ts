@@ -350,6 +350,9 @@ export function layout(n: number, cols: number, maxRows = 256, old = 0): Layout 
 export const sceneRows = (n: number, cols: number, maxRows?: number, old = 0) => layout(n, cols, maxRows, old).rows
 
 const RANK = (w: Worker) => (w.state === 'ask' ? 0 : !w.end ? 1 : w.state === 'failed' ? 2 : 3)
+// Questions and live workers first, then failed, then done (stable); shelved ones last, as lines.
+export const cardOrder = (ws: Worker[], now: number) =>
+  [...ws].sort((a, b) => +isShelved(a, now) - +isShelved(b, now) || RANK(a) - RANK(b))
 
 export const clock = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000))
@@ -462,8 +465,8 @@ function panel(g: Grid, x0: number, y0: number, W: number, H: number) {
 }
 
 type Place = (look: Look, x: number, y: number, alt: string) => void
-// Where a card's name is: a Button laid over it opens the worker's detail view.
-export type Hit = { key: string; x: number; y: number; label: string; color: number }
+// A card's top row up to its clock (name, model, effort: no live cells): a Button over it opens the detail view.
+export type Hit = { key: string; x: number; y: number; w: number; h: number; label: string; color: number }
 
 const iconOf = (w: Worker, f: number) =>
   w.state === 'done' ? '✓' : w.state === 'failed' ? '✗' : w.state === 'ask' ? '?'
@@ -520,7 +523,7 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
   const clockX = R - 1 - elapsed.length
   g.text(clockX, row(0), elapsed, over ? ink(DIM) : TEXT)
   let x = X + g.text(X, row(0), w.name, ink(theme), clockX - X - 1)
-  hits?.push({ key: w.key, x: X, y: row(0), label: w.name, color: ink(theme) })
+  hits?.push({ key: w.key, x: X, y: row(0), w: clockX - X - 1, h: 1, label: w.name, color: ink(theme) })
   const room = () => clockX - x - 2
   if (room() > 7) x += 1 + g.text(x + 1, row(0), modelLabel(w.model, w.provider), ink(DIM), room() - 1)
   // the quota home next to the model, dropped first when narrow
@@ -682,8 +685,7 @@ export function drawScene(
   const per = perRow(cols)
   const W = Math.floor(cols / per)
   const cw = per > 1 ? W - 1 : W
-  // Questions and live workers first, then failed, then done (stable); shelved ones last, as lines.
-  const list = [...ws].sort((a, b) => +isShelved(a, now) - +isShelved(b, now) || RANK(a) - RANK(b))
+  const list = cardOrder(ws, now)
   list.slice(0, fit.cards).forEach((w, i) => card(g, w, (i % per) * W, HEADER_H + Math.floor(i / per) * CARD_H, cw, now, place, hits))
   const top = HEADER_H + Math.ceil(fit.cards / per) * CARD_H
   list.slice(fit.cards, fit.cards + fit.lines * per)

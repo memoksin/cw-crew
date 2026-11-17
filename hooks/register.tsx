@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { FRAME_MS, frameFile, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, CARD, clock, drawDetail, drawScene, encode, isActive, LABEL, shelved, msysToWin, PANE as PANE_BG, parseEvents, sceneRows, sceneSvg,
+  buildWorkers, CARD, cardOrder, clock, drawDetail, drawScene, encode, isActive, LABEL, shelved, msysToWin, PANE as PANE_BG, parseEvents, sceneRows, sceneSvg,
   SPRITE_COLS, SPRITE_ROWS, type Meta, type Run, type Spot, type State, type Totals, type Worker,
 } from './scene'
 import type { Tab } from '../types'
@@ -19,7 +19,7 @@ const slots = atom({ plugin: 'cw-crew', key: 'slots' } as const, 0)
 const selected = atom({ plugin: 'cw-crew', key: 'selected' } as const, '')
 const tab = atom({ plugin: 'cw-crew', key: 'tab' } as const, 'notes' as Tab)
 const TABS: Tab[] = ['notes', 'steps', 'report', 'test']
-const NOTES = 4, STEPS = 10, REPORT_CHARS = 2400, TEST_LINES = 20
+const NOTES = 4, NOTE_CHARS = 400, STEPS = 10, REPORT_CHARS = 2400, TEST_LINES = 20
 const css = (c: number) => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`
 const TEXT = '#e6e6f0', DIM = '#8a8fa3', GOOD = '#7bd88f', BAD = '#ff5c5c'
 type Tracked = Run & { size: number; final: boolean }
@@ -53,7 +53,7 @@ let svgKick = 0
 const pngs = new Map<string, string>()
 // Detail view: the open worker's live notes (its assistant text) and final report, refreshed by poll().
 let selKey = ''
-let detail: { key: string; size: number; notes: string[]; report?: string; test?: string } = { key: '', size: -1, notes: [] }
+let detail: { key: string; size: number; notes: string[]; older?: number; report?: string; test?: string } = { key: '', size: -1, notes: [] }
 let detailKick = 0
 // The lead's own spend and its 5-hour readings (session.measure), to weigh the crew's share of that limit.
 let leadCost = 0
@@ -132,6 +132,9 @@ async function poll($: EngineInterface) {
     const grew = all.length !== workers.length || shelved(all, now) !== shelved(workers, now)
     workers = all
     if (grew) await update($, slots, () => all.length * 1000 + shelved(all, now))
+    // The buttons sit where render() put the cards: a new order needs a new render.
+    const order = cardOrder(all, now).map(w => w.key).join(' ')
+    if (order !== lastOrder) { lastOrder = order; $.ui.invalidate('ui.render') }
 
     const active = all.filter(isActive).length
     const asking = all.filter(w => w.state === 'ask').length
@@ -193,7 +196,7 @@ async function refreshDetail($: EngineInterface, all: Worker[], byName: Map<stri
     try { report = ((JSON.parse((await readText($, `${id}.json`)) ?? '{}') as { result?: string }).result ?? '').trim() } catch { report = '' }
     test = (await readText($, `${id}.accept`))?.trimEnd().split('\n').slice(-TEST_LINES).join('\n')
   }
-  detail = { key: w.key, size, notes: notes.slice(-NOTES), report, test }
+  detail = { key: w.key, size, notes: notes.slice(-NOTES), older: Math.max(0, notes.length - NOTES), report, test }
   $.ui.invalidate('ui.render')
 }
 
@@ -208,14 +211,14 @@ function openDetail($: EngineInterface, key: string) {
 
 // Each tool step with how it came back: tool results follow their calls in order.
 function stepsOf(w: Worker) {
-  const out: { t: number; tool: string; arg: string; res?: string }[] = []
+  const out: { t: number; tool: string; arg: string; note?: string; res?: string }[] = []
   let next = 0
   for (const ev of w.runIds.flatMap(id => runs.get(id)?.events ?? [])) {
-    if (ev.e === 'tool') out.push({ t: ev.t, tool: ev.tool ?? '', arg: ev.arg ?? '' })
+    if (ev.e === 'tool') out.push({ t: ev.t, tool: ev.tool ?? '', arg: ev.arg ?? '', note: ev.note })
     else if ((ev.e === 'ok' || ev.e === 'error' || ev.e === 'denied') && out[next]) out[next++]!.res = ev.e
     else if (ev.e === 'init') next = out.length
   }
-  return out.slice(-STEPS)
+  return { steps: out.slice(-STEPS), older: Math.max(0, out.length - STEPS) }
 }
 
 // A drawn scene as one Svg, the sprites' PNG frames inlined; half-block pixels if a frame will not read.
@@ -239,7 +242,12 @@ async function svgOf($: EngineInterface, draw: (images: boolean) => { rows: numb
 // Ask for the rows the scene needs (room for two workers once any run), not the default third of the screen.
 const paneArgs = () => ({ id: PANE, title: 'Crew', rows: sceneRows(workers.length && Math.max(2, workers.length), 60), columns: 60 })
 
+// Finish toasts of the last ~2 s: past 3, the ones landing together merge into one.
+let finToasts: number[] = []
+let lastOrder = ''
 function announce($: EngineInterface, all: Worker[], now: number) {
+  const fin: Worker[] = []
+  finToasts = finToasts.filter(t => now - t < 2000)
   // One state per key (the last run wins): two entries with one key would flip-flop and toast every poll.
   for (const w of new Map(all.map(w => [w.key, w])).values()) {
     const before = seen.get(w.key)
@@ -247,8 +255,17 @@ function announce($: EngineInterface, all: Worker[], now: number) {
     if (before === w.state || (before === undefined && w.end !== undefined && now - w.end > 15_000)) continue
     if (w.state === 'ask') $.ui.toast(`? ${w.name} asks: ${w.question ?? ''}`, { timeoutMs: 8000 })
     else if (w.state === 'blocked') $.ui.toast(`! ${w.name} blocked: ${w.arg}`)
-    else if (w.state === 'done') $.ui.toast(`✓ ${w.name} (${w.role}) done`)
-    else if (w.state === 'failed') $.ui.toast(`✗ ${w.name} (${w.role}) failed${w.accept?.ok === false ? ' its test' : ''}`)
+    else if (w.state === 'done' || w.state === 'failed') fin.push(w)
+  }
+  if (fin.length > 1 && finToasts.length + fin.length > 3) {
+    const ok = fin.filter(w => w.state === 'done').length
+    $.ui.toast([ok && `${ok} done`, fin.length - ok && `${fin.length - ok} failed`].filter(Boolean).join(' · '))
+    finToasts.push(now)
+    return
+  }
+  for (const w of fin) {
+    finToasts.push(now)
+    $.ui.toast(w.state === 'done' ? `✓ ${w.name} (${w.role}) done` : `✗ ${w.name} (${w.role}) failed${w.accept?.ok === false ? ' its test' : ''}`)
   }
 }
 
@@ -349,23 +366,37 @@ export const register: Register = on => {
       const body =
         current === 'notes' ? (!ready ? [<Text color={DIM}>reading…</Text>]
           : detail.notes.length === 0 ? [<Text color={DIM}>no notes yet</Text>]
-          : detail.notes.map(n => <Text color={TEXT} wrap="wrap">{n.slice(0, 400)}</Text>))
+          : [
+            ...(detail.older ? [<Text color={DIM}>… +{detail.older} earlier</Text>] : []),
+            ...detail.notes.map(n => <Text color={TEXT} wrap="wrap">{n.length > NOTE_CHARS ? `${n.slice(0, NOTE_CHARS)}… +${n.length - NOTE_CHARS} chars` : n}</Text>),
+          ])
         : current === 'steps' ? (() => {
-          const steps = stepsOf(open)
-          return steps.length === 0 ? [<Text color={DIM}>none yet</Text>] : steps.map(st => (
+          const { steps, older } = stepsOf(open)
+          return steps.length === 0 ? [<Text color={DIM}>none yet</Text>] : [
+            ...(older ? [<Text color={DIM}>… +{older} earlier</Text>] : []),
+            ...steps.map(st => (
             <Text wrap="truncate-end">
               <Text color={st.res === 'ok' ? GOOD : st.res ? BAD : DIM}>{st.res === 'ok' ? '✓' : st.res ? '✗' : '·'} </Text>
               <Text color={DIM}>{ago(st.t).padStart(5)} </Text>
               <Text color={TEXT}>{st.tool} </Text><Text color={DIM}>{st.arg}</Text>
+              {st.note ? <Text color={DIM}> · {st.note}</Text> : null}
             </Text>
-          ))
+            )),
+          ]
         })()
         : current === 'report' ? [open.end === undefined ? <Text color={DIM}>still working</Text>
           : !ready || detail.report === undefined ? <Text color={DIM}>reading…</Text>
-          : <Text color={TEXT} wrap="wrap">{detail.report ? detail.report.slice(0, REPORT_CHARS) : 'no report (timed out or killed)'}</Text>]
+          : <Text color={TEXT} wrap="wrap">{detail.report
+            ? detail.report.length > REPORT_CHARS ? `${detail.report.slice(0, REPORT_CHARS)}… +${detail.report.length - REPORT_CHARS} chars` : detail.report
+            : 'no report (timed out or killed)'}</Text>]
         : [open.accept === undefined ? <Text color={DIM}>{open.end === undefined && open.state !== 'test' ? 'runs after the work' : 'no acceptance command'}</Text>
           : <Text color={open.accept.ok ? GOOD : BAD}>{open.accept.ok ? '✓ passed' : `✗ failed${open.accept.rc !== undefined ? ` (rc ${open.accept.rc})` : ''}`}</Text>,
           ...(ready && detail.test ? [<Text color={DIM} wrap="wrap">{detail.test}</Text>] : [])]
+      // Another worker's question must not hide behind this view: count them, jump to the next one.
+      const asking = workers.filter(w => w.state === 'ask')
+      const failing = workers.filter(w => w.state === 'failed').length
+      const at = workers.indexOf(open)
+      const nextAsk = [...workers.slice(at + 1), ...workers.slice(0, at)].find(w => w.state === 'ask')
       const resume = open.sid ? `cw ${open.role} -r ${open.sid}` : ''
       return (
         <Box flexDirection="column" backgroundColor={css(PANE_BG)} gap={1}>
@@ -373,6 +404,11 @@ export const register: Register = on => {
             <Button key="back" hotkey="b" onPress={() => { selKey = ''; mounted = undefined; void update($, selected, () => '') }}>‹ back</Button>
             {resume && <Button key="copy" hotkey="c" onPress={p => void $.ui.copy({ text: resume, surface: p.surface })
               .then(r => $.ui.toast(r.isCopied ? `copied: ${resume}` : 'could not copy'))}>copy resume</Button>}
+          </Box>
+          <Box flexDirection="row" gap={1} paddingX={1}>
+            <Text color={asking.length ? '#ffe8a3' : DIM}>{asking.length} asking</Text>
+            <Text color={failing ? BAD : DIM}>· {failing} failed</Text>
+            {nextAsk && <Button key="next-ask" hotkey="n" onPress={() => openDetail($, nextAsk.key)}>next asking: {nextAsk.name} ›</Button>}
           </Box>
           {hero}
           <Box flexDirection="column" paddingX={1}>
@@ -418,15 +454,25 @@ export const register: Register = on => {
     const { rows, words, spots, hits } = drawScene(workers, cols, await $.clock.now(), maxRows, images, totals)
     mounted = { cols, rows, maxRows, images, keys: new Set(spots.map(s => s.key)) }
     const raster = <Raster key="crew" columns={cols} rows={rows} cells={encode(words)} />
-    // Each card's name is a Button over the same text: a click opens its detail view.
+    // Each card's top row (up to its clock) is a Button drawn with the same cells: a click opens its detail view.
+    // Buttons hold text only, and paint() refreshes the raster but not them, so they cover no live cells.
     // Not `h`: JSX compiles to the global h(), which a parameter of that name would shadow.
-    const buttons = hits.map(hit => (
-      <Box position="absolute" top={hit.y} left={hit.x}>
-        <Button key={`open-${hit.key}`} plain onPress={() => openDetail($, hit.key)}>
-          <Text color={css(hit.color)} backgroundColor={css(CARD)}>{hit.label}</Text>
-        </Button>
-      </Box>
-    ))
+    const buttons = hits.map(hit => {
+      const runs: { s: string; fg: number; bg: number }[] = []
+      for (let x = hit.x; x < hit.x + hit.w; x++) {
+        const i = (hit.y * cols + x) * 3, fg = words[i + 1] ?? 0, bg = words[i + 2] ?? 0
+        const ch = String.fromCodePoint(words[i] ?? 32), last = runs[runs.length - 1]
+        if (last && last.fg === fg && last.bg === bg) last.s += ch
+        else runs.push({ s: ch, fg, bg })
+      }
+      return (
+        <Box position="absolute" top={hit.y} left={hit.x}>
+          <Button key={`open-${hit.key}`} plain onPress={() => openDetail($, hit.key)}>
+            <Text>{runs.map(r => <Text color={css(r.fg)} backgroundColor={css(r.bg)}>{r.s}</Text>)}</Text>
+          </Button>
+        </Box>
+      )
+    })
     if (!images) return <Box width={cols} height={rows}>{raster}{buttons}</Box>
     // Each sprite an Image over the blank cells the scene left for it; paint() swaps its frames.
     shown = new Map(spots.map(s => [s.key, lookKey(s.look)]))

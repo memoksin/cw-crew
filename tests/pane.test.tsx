@@ -200,3 +200,71 @@ test('after the first poll only live/ is listed, and a new worker shows up throu
   expect(listed[0]).toBe(DIR)
   expect(listed.slice(1).every(p => p === `${DIR}/live`)).toBe(true)
 })
+
+test('more than 3 finishes landing together merge into one toast', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const files: Record<string, string> = {}
+  for (let i = 0; i < 6; i++) {
+    files[`r${i}.meta`] = meta(`w${i}`)
+    files[`r${i}.done`] = '0'
+    files[`r${i}.events`] = JSON.stringify({ e: 'result', ok: i < 5, t: NOW - 1000 }) + '\n'
+  }
+  on('fs.list', async () => ({ value: Object.entries(files).map(([name, text]) => ({ name, kind: 'file', size: text.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(files))
+  on('fs.read', async (_$, e) => {
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  const toasts: string[] = []
+  on('ui.toast', async (_$, e) => { toasts.push(e.text); return { value: undefined } as never })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.status', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  expect(toasts).toEqual(['5 done · 1 failed'])
+})
+
+test('detail view: shows what it cuts, the Bash note, and jumps to the next asking worker', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { CW_LOG_DIR: DIR, HOME: '/h' })
+  const long = 'x'.repeat(450)
+  const text = (t: string) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: t }] } })
+  const files: Record<string, string> = {
+    'a.meta': meta('alpha'),
+    'a.events': '{"e":"init","sid":"sid-a","t":1791799971000}\n'
+      + Array.from({ length: 12 }, (_, i) => JSON.stringify({ e: 'tool', tool: 'Bash', arg: `cmd${i}`, note: `why${i}`, t: 1791799972000 + i })).join('\n') + '\n',
+    'a.jsonl': [long, 'n2', 'n3', 'n4', 'n5', 'n6'].map(text).join('\n') + '\n',
+    'b.meta': meta('beta'),
+    'b.events': '{"e":"init","t":1791799971000}\n{"e":"result","ok":true,"t":1791799990000}\n',
+    'b.done': '0',
+    'b.ask': '{"q":"which?"}',
+  }
+  on('fs.list', async () => ({ value: Object.entries(files).map(([name, t]) => ({ name, kind: 'file', size: t.length, mtimeMs: NOW - 1000 })) }) as never)
+  on('fs.stat', statOf(files))
+  on('fs.read', async (_$, e) => {
+    if (e.path.includes('/frames/')) return { value: { base64: 'UE5H' } } as never
+    const name = e.path.slice(DIR.length + 1)
+    return name in files ? { value: files[name] } as never : { deny: `no ${name}` } as never
+  })
+  on('session.id', async () => ({ value: 's' }) as never)
+  on('session.start', async (_$, e) => e as never)
+  for (const ev of ['command.register', 'ui.status', 'ui.toast', 'ui.log', 'ui.blit'] as const) on(ev, async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.session.start({ cwd: '/w' } as never)
+  await clock.advance(500)
+  const ui = await $.ui.mount({
+    plugin: 'cw-crew', surface: 'terminal', component: 'Pane', requestId: 'cw-crew',
+    props: { title: 'Crew', isFocused: false, bodyColumns: 60, placement: 'dock' } as never,
+  })
+  await ui.drawn()
+  await ui.press({ key: 'open-a' })
+  await clock.advance(500)
+  expect(await ui.find({ type: 'Text', text: /… \+2 earlier/ })).toBeDefined()
+  await ui.press({ key: 'tab-steps' })
+  expect(await ui.find({ type: 'Text', text: /… \+2 earlier/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /why11/ })).toBeDefined()
+  expect(await ui.find({ key: 'next-ask' })).toBeDefined()
+})
