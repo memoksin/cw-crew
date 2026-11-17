@@ -214,6 +214,10 @@ rm -f "$t/args"; CW_DENY="$t/shared" CW_DENY_GLOBS='**/shared.json' CW_CODEX_DEN
 cset=$(grep -m1 '^{"language"' "$t/args")
 check "Claude settings deny ~/.ssh and CW_DENY paths for Read/Edit/Write, even with -a" 'jq -e --arg s "/$t/shared" "(.permissions.deny | index(\"Read(~/.ssh/**)\") != null and index(\"Write(~/.ssh/**)\") != null and index(\"Read(\" + \$s + \"/**)\") != null and index(\"Read(**/.env)\") != null and index(\"Read(**/shared.json)\") != null)" <<< "$cset" >/dev/null'
 check "CW_CODEX_ONLY_DENY and CW_CODEX_DENY stay out of the Claude settings" '! grep -q "cxonly\|cxold" "$t/args"'
+mkdir -p "$t/sbx/a/node_modules" && touch "$t/sbx/fake.secret" "$t/sbx/a/fake.secret" "$t/sbx/a/node_modules/fake.secret" "$t/sbx/ok.txt"
+rm -f "$t/args"; CW_DENY="$t/shared" CW_DENY_GLOBS='**/fake.secret' CW_CODEX_ONLY_DENY="$t/cxonly" "$here/bin/cw" coder -C "$t/sbx" -a 'Bash(curl -s https://x.test)' <<< "x" >/dev/null 2>&1
+sbx=$(grep -m1 '^{"language"' "$t/args" | jq -c .sandbox)
+check "Claude sandbox: on, no unsandboxed retry, denies the list and glob matches in the work dir, grants run outside" 'jq -e --arg h "$HOME" --arg t "$t" ".enabled and .autoAllowBashIfSandboxed and (.allowUnsandboxedCommands == false) and (.filesystem.denyRead | index(\$h + \"/.ssh\") != null and index(\$t + \"/shared\") != null and (map(endswith(\"sbx/fake.secret\")) | any) and (map(endswith(\"a/fake.secret\")) | any) and (map(test(\"node_modules|ok.txt|cxonly\")) | any | not)) and .excludedCommands == [\"curl -s https://x.test\"]" <<< "$sbx" >/dev/null && grep -q "PERMISSION: Bash(<exact command>)" "$t/args"'
 rm -f "$t/args"; CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -a 'Bash(ls)' <<< "x" >/dev/null 2>&1
 check "-a keeps the run on Claude" 'arg claude-sonnet-5-5'
 rm -f "$t/args"; CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"

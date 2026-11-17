@@ -111,7 +111,7 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_KILL_ALLOW` | — | colon-separated command prefixes `cwkill` may also stop |
 | `CW_ACCEPT_FAIL_RE` | `^\s*(FAIL\b(?!:? *0\b)\|SCRIPT ERROR)` | Perl regex: a `-T` run that exits 0 but prints a matching line is `accept=FAIL(output)`. Empty turns it off |
 
-Claude workers: the deny rules cover the Read/Edit/Write tools. A Bash read (`cat ~/.ssh/...`) is blocked only by the prompt and the auto-mode classifier, not by a tool rule. Codex denies at the filesystem level.
+Claude workers: the deny rules cover the Read/Edit/Write tools, and Bash runs in Claude Code's OS sandbox: the deny list (and files matching the secret globs under the work dir) cannot be read, the network is off, and writes outside the work dir fail, as for Codex. A worker that needs one blocked command ends with `PERMISSION: Bash(<cmd>)`; `-a 'Bash(<cmd>)'` runs that exact command outside the sandbox.
 
 Set them in `~/.claude/settings.json` under `env`.
 

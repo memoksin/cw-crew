@@ -45,6 +45,7 @@ Check once per session: `echo ${CW_CODEX:-0}`. On: scouts default to `luna`, cod
 - Needs more than the window (huge logs, a whole-repo read): use a Claude tier (1M).
 - Sandbox: coders write only in the work dir. Network, `.git` and other processes are blocked, and a blocked call cannot be approved, so a coder that needs the network or `-a` goes to `sonnet`. `rm -rf` inside the work dir is not blocked: use `-W` on an important repo.
 - Reads: both providers share one deny list (credential dirs, secret globs, `CW_DENY`, `CW_DENY_GLOBS`). `CW_CODEX_ONLY_DENY` keeps paths (personal data) away from Codex only. Tasks and the files workers read go to OpenAI.
+- Claude workers run Bash in the OS sandbox too: no network, writes only in the work dir. A blocked command comes back as `PERMISSION: Bash(cmd)`; grant it with `-a 'Bash(cmd)'` (Claude only) and it runs outside the sandbox. Codex cannot be granted: send that task to a Claude tier.
 - No turn limit on Codex: only `-t` stops a loop. No image reading: visual review stays on Claude.
 
 ## Claude tiers (`-M`)
