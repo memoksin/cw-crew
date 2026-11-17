@@ -458,3 +458,16 @@ test('the worktree chip hides when it repeats the worker name', () => {
   expect(text('cc-esc')).not.toContain('⎇')
   expect(text('other')).toContain('⎇ cc-esc')
 })
+
+test('a tool stays the state until its result arrives, then falls back to thinking', async () => {
+  const run: Run = {
+    id: 'p', meta: meta({ role: 'coder', model: 'sonnet' }),
+    events: [
+      { e: 'init', t: T0 * 1000 + 100 },
+      { e: 'tool', tool: 'Bash', arg: 'bun test', t: T0 * 1000 + 2000 },
+    ],
+  }
+  expect(runState(run, T0 * 1000 + 40_000).state).toBe('bash')
+  run.events.push({ e: 'ok', t: T0 * 1000 + 41_000 })
+  expect(runState(run, T0 * 1000 + 50_000).state).toBe('think')
+})

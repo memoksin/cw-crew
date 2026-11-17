@@ -79,24 +79,28 @@ export function runState(run: Run, now: number): RunView {
   const trail: Kind[] = [], times: number[] = []
   let arg = '', note = '', thought = '', lastTool: Ev | undefined, lastDenied: Ev | undefined, lastError: Ev | undefined
   let result: Ev | undefined, accept: Ev | undefined, accepted: Ev | undefined, blocked = 0
-  let ctx = 0, add = 0, del = 0, files = 0
+  let ctx = 0, add = 0, del = 0, files = 0, pending = 0
   const mids = new Set<string>()
   for (const ev of run.events) {
     if (ev.ctx) ctx = ev.ctx
     if (ev.mid) mids.add(ev.mid)
+    // the model only writes or thinks again once its tool results are back
+    if (ev.e === 'think' || ev.e === 'text') pending = 0
     if (ev.e === 'think' && ev.note) thought = ev.note
     if (ev.e === 'tool') {
       lastTool = ev
+      pending++
       arg = ev.arg ?? ''
       note = thought || (ev.note ?? '')   // Codex: its reasoning summary, else the command
       thought = ''
       trail.push(kindOf(ev.tool ?? '', arg))
       times.push(ev.t)
-    } else if (ev.e === 'denied') { lastDenied = ev; blocked++ }
-    else if (ev.e === 'error') lastError = ev
+    } else if (ev.e === 'denied') { lastDenied = ev; blocked++; pending = Math.max(0, pending - 1) }
+    else if (ev.e === 'error') { lastError = ev; pending = Math.max(0, pending - 1) }
+    else if (ev.e === 'ok') pending = Math.max(0, pending - 1)
     else if (ev.e === 'result') result = ev
     // A resume replays the old session's result before its own init: only a result after the last init ends the run
-    else if (ev.e === 'init') result = undefined
+    else if (ev.e === 'init') { result = undefined; pending = 0 }
     else if (ev.e === 'accept') accept = ev
     else if (ev.e === 'accept_end') accepted = ev
     else if (ev.e === 'diff') { add += ev.add ?? 0; del += ev.del ?? 0; files += ev.files ?? 0 }
@@ -130,7 +134,7 @@ export function runState(run: Run, now: number): RunView {
   if (!last || now - start < 1500) return { ...base, state: 'boot', stateAt: start }
   if (lastDenied && now - lastDenied.t < 4000) return { ...base, state: 'blocked', stateAt: lastDenied.t }
   if (lastError && now - lastError.t < 2500) return { ...base, state: 'error', stateAt: lastError.t }
-  if (lastTool && (last === lastTool || now - lastTool.t < 1500)) {
+  if (lastTool && (pending > 0 || last === lastTool || now - lastTool.t < 1500)) {
     return { ...base, state: trail[trail.length - 1] ?? 'bash', stateAt: lastTool.t }
   }
   return { ...base, state: 'think', stateAt: last.t }
