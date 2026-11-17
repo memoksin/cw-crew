@@ -203,8 +203,10 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
 }
 
 export const KEEP_MS = 120_000
-export const isVisible = (w: Worker, now: number) =>
-  w.end === undefined || w.state === 'ask' || now - w.end < KEEP_MS
+// A finished worker stays: after KEEP_MS it shrinks from a card to a one-line row.
+export const isShelved = (w: Worker, now: number) =>
+  w.end !== undefined && w.state !== 'ask' && now - w.end >= KEEP_MS
+export const shelved = (ws: Worker[], now: number) => ws.filter(w => isShelved(w, now)).length
 export const isActive = (w: Worker) => w.end === undefined
 
 // ---------- pixels ----------
@@ -322,12 +324,15 @@ export const perRow = (cols: number) => Math.max(1, Math.min(3, Math.floor(cols 
 // The engine scrolls a pane body taller than its window; past 256 rows the scene folds:
 // as many full cards as fit, the rest as one-line rows, then a "+N" row.
 export type Layout = { rows: number; cards: number; lines: number; more: number }
-export function layout(n: number, cols: number, maxRows = 256): Layout {
+// `old` of the n workers (the last ones) are shelved: one-line rows from the start.
+export function layout(n: number, cols: number, maxRows = 256, old = 0): Layout {
   const cap = Math.max(1, Math.min(256, maxRows))
   const per = perRow(cols)
-  const full = HEADER_H + (n === 0 ? EMPTY_H : Math.ceil(n / per) * CARD_H)
-  if (full <= cap || n === 0) return { rows: Math.min(full, cap), cards: n, lines: 0, more: 0 }
-  for (let k = Math.ceil(n / per) - 1; k >= 0; k--) {
+  const c = n - Math.min(old, n)
+  const shelf = Math.ceil((n - c) / per)
+  const full = HEADER_H + (n === 0 ? EMPTY_H : Math.ceil(c / per) * CARD_H + shelf)
+  if (full <= cap || n === 0) return { rows: Math.min(full, cap), cards: c, lines: shelf, more: 0 }
+  for (let k = Math.ceil(c / per) - 1; k >= 0; k--) {
     const cards = Math.min(n, k * per)
     const lines = Math.ceil((n - cards) / per)
     const rows = HEADER_H + k * CARD_H + lines
@@ -336,7 +341,7 @@ export function layout(n: number, cols: number, maxRows = 256): Layout {
   const lines = Math.max(0, cap - HEADER_H - 1)
   return { rows: cap, cards: 0, lines, more: n - lines * per }
 }
-export const sceneRows = (n: number, cols: number, maxRows?: number) => layout(n, cols, maxRows).rows
+export const sceneRows = (n: number, cols: number, maxRows?: number, old = 0) => layout(n, cols, maxRows, old).rows
 
 const RANK = (w: Worker) => (w.state === 'ask' ? 0 : !w.end ? 1 : w.state === 'failed' ? 2 : 3)
 
@@ -639,7 +644,7 @@ function header(g: Grid, ws: Worker[], now: number, totals: Totals) {
 export function drawScene(
   ws: Worker[], cols: number, now: number, maxRows?: number, images = false, totals: Totals = {},
 ): { rows: number; words: Uint32Array; spots: Spot[]; hits: Hit[] } {
-  const fit = layout(ws.length, cols, maxRows)
+  const fit = layout(ws.length, cols, maxRows, shelved(ws, now))
   const rows = fit.rows
   const g = new Grid(cols, rows, PANE)
   const spots: Spot[] = []
@@ -668,8 +673,8 @@ export function drawScene(
   const per = perRow(cols)
   const W = Math.floor(cols / per)
   const cw = per > 1 ? W - 1 : W
-  // Overflowing: questions and live workers keep the cards, finished ones drop to lines first.
-  const list = fit.cards < ws.length ? [...ws].sort((a, b) => RANK(a) - RANK(b)) : ws
+  // Questions and live workers first, then failed, then done (stable); shelved ones last, as lines.
+  const list = [...ws].sort((a, b) => +isShelved(a, now) - +isShelved(b, now) || RANK(a) - RANK(b))
   list.slice(0, fit.cards).forEach((w, i) => card(g, w, (i % per) * W, HEADER_H + Math.floor(i / per) * CARD_H, cw, now, place, hits))
   const top = HEADER_H + Math.ceil(fit.cards / per) * CARD_H
   list.slice(fit.cards, fit.cards + fit.lines * per)

@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { modelLabel, msysToWin, buildWorkers, DETAIL_ROWS, drawDetail, drawScene, gauges, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
+import { KEEP_MS, isShelved, shelved, modelLabel, msysToWin, buildWorkers, DETAIL_ROWS, drawDetail, drawScene, gauges, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -103,6 +103,23 @@ test('an overflowing crew fits the pane: cards, then one-line rows, then a +N ro
     expect(rows <= maxRows).toBe(true)
     expect(words.length).toBe(60 * rows * 3)
   }
+})
+
+test('cards sort by rank, and finished workers shrink to lines after KEEP_MS instead of vanishing', async () => {
+  const runs: Run[] = [
+    { id: 'd', meta: meta({ start: T0 }), events: [{ e: 'think', t: T0 * 1000 + 50 }], rc: 0, doneAt: T0 * 1000 + 100 },
+    { id: 'a', meta: meta({ start: T0 + 1 }), events: [{ e: 'think', t: T0 * 1000 + 50 }] },
+  ]
+  const early = T0 * 1000 + 4000
+  const first = buildWorkers(runs, early)
+  expect(shelved(first, early)).toBe(0)
+  const late = T0 * 1000 + KEEP_MS + 60_000
+  const ws = buildWorkers(runs, late)
+  expect(ws.length).toBe(2)
+  const old = ws.filter(w => isShelved(w, late)).length
+  expect(old).toBe(1)
+  expect(layout(2, 60, 256, old)).toEqual({ rows: 2 + 6 + 1, cards: 1, lines: 1, more: 0 })
+  expect(drawScene(ws, 60, late).rows).toBe(9)
 })
 
 test('two resumes of one sid, the first killed before its result, stay one worker', async () => {

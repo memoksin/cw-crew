@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { FRAME_MS, frameFile, imageSource, lookKey } from './creatures'
 import {
-  buildWorkers, CARD, clock, drawDetail, drawScene, encode, isActive, isVisible, LABEL, msysToWin, PANE as PANE_BG, parseEvents, sceneRows, sceneSvg,
+  buildWorkers, CARD, clock, drawDetail, drawScene, encode, isActive, LABEL, shelved, msysToWin, PANE as PANE_BG, parseEvents, sceneRows, sceneSvg,
   SPRITE_COLS, SPRITE_ROWS, type Meta, type Run, type Spot, type State, type Totals, type Worker,
 } from './scene'
 import type { Tab } from '../types'
@@ -129,10 +129,9 @@ async function poll($: EngineInterface) {
     // and the crew's part of it is taken as its part of the money spent.
     const moved = five ? five.last - five.first : 0
     totals = { cost: spent || undefined, limit: spent && moved > 0 ? (moved * spent) / (spent + leadCost) : undefined }
-    const visible = all.filter(w => isVisible(w, now))
-    const grew = visible.length !== workers.length
-    workers = visible
-    if (grew) await update($, slots, () => visible.length)
+    const grew = all.length !== workers.length || shelved(all, now) !== shelved(workers, now)
+    workers = all
+    if (grew) await update($, slots, () => all.length * 1000 + shelved(all, now))
 
     const active = all.filter(isActive).length
     const asking = all.filter(w => w.state === 'ask').length
@@ -256,8 +255,9 @@ function announce($: EngineInterface, all: Worker[], now: number) {
 async function paint($: EngineInterface) {
   const at = mounted
   const root = $.plugin.root
-  if (!at || sceneRows(workers.length, at.cols, at.maxRows) !== at.rows) return
-  const { words, spots } = drawScene(workers, at.cols, await $.clock.now(), at.maxRows, at.images, totals)
+  const now = await $.clock.now()
+  if (!at || sceneRows(workers.length, at.cols, at.maxRows, shelved(workers, now)) !== at.rows) return
+  const { words, spots } = drawScene(workers, at.cols, now, at.maxRows, at.images, totals)
   const res = await $.ui.blit({ requestId: PANE, key: 'crew', cells: encode(words) })
   if (res.deny) { mounted = undefined; return }
   // The cells went in, so the pane is mounted: an Image refused now is one drawing its alt.
