@@ -452,7 +452,7 @@ if [ -n "$cdx" ]; then
   cxev='fromjson? |
     if .type=="thread.started" then {e:"init",sid:.thread_id}
     elif .type=="item.started" then .item |
-      if .type=="command_execution" then {e:"tool",tool:"Bash",arg:(.command|tostring|.[0:120])}
+      if .type=="command_execution" then {e:"tool",tool:"Bash",arg:(.command|tostring|.[0:120]),note:((.command|tostring|gsub("\\s+";" ")|ltrimstr("/bin/zsh -lc ")|ltrimstr("/bin/bash -lc ")|.[0:60]))}
       elif .type=="file_change" then {e:"tool",tool:"Edit",arg:((.changes[0].path // "")|tostring|.[0:120])}
       elif .type=="web_search" then {e:"tool",tool:"WebSearch",arg:((.query // "")|tostring|.[0:120])}
       else empty end
@@ -461,7 +461,8 @@ if [ -n "$cdx" ]; then
         (if .exit_code==0 then {e:"ok"} elif ((.aggregated_output // "")|test("Operation not permitted|Permission denied";"i")) then {e:"denied"} else {e:"error"} end)
       elif .type=="file_change" then {e:(if .status=="failed" then "error" else "ok" end)}
       elif .type=="web_search" then {e:"ok"}
-      elif .type=="reasoning" then {e:"think"} elif .type=="agent_message" then {e:"text"} else empty end
+      elif .type=="reasoning" then {e:"think"} + (((.text // .summary // "")|if type=="array" then map(.text? // .)|join(" ") else tostring end|gsub("[*_`#]";"")|gsub("\\s+";" ")|ltrimstr(" ")|.[0:60]) as $n | if $n=="" then {} else {note:$n} end)
+      elif .type=="agent_message" then {e:"text"} else empty end
     elif .type=="turn.completed" then {e:"result",ok:true,sub:"success",cin:.usage.cached_input_tokens,
       nin:(.usage.input_tokens - .usage.cached_input_tokens),out:.usage.output_tokens}
     elif .type=="turn.failed" then {e:"result",ok:false,sub:"failed"}

@@ -172,7 +172,8 @@ echo '{"type":"thread.started","thread_id":"cx-1"}'
 case ${FAKE_CX:-ok} in
   limit) echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit"}}'; exit 1 ;;
   edit) echo x >> a.txt; echo '{"type":"turn.failed","error":{"message":"You have hit your usage limit"}}'; exit 1 ;;
-  *) echo '{"type":"item.started","item":{"id":"1","type":"command_execution","command":"ls"}}'
+  *) [ -z "${FAKE_THINK:-}" ] || echo '{"type":"item.completed","item":{"id":"0","type":"reasoning","text":"'"$FAKE_THINK"'"}}'
+     echo '{"type":"item.started","item":{"id":"1","type":"command_execution","command":"ls"}}'
      echo '{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls","exit_code":0,"aggregated_output":""}}'
      echo '{"type":"item.completed","item":{"id":"2","type":"agent_message","text":"'"${FAKE_TXT:-DONE cx}"'"}}'
      echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":7}}' ;;
@@ -197,6 +198,11 @@ check "Codex coder: lean flags, workspace sandbox, task on stdin" 'cx "agents.en
 check "Codex denies common credentials and workspace secrets without user config" 'cxdefaults'
 check "Codex meta: quota for the pane, session marker" 'jq -e "select(.model==\"codex/gpt-6.1-sol\") | .quota.five == 80 and .quota.week == 97 and .quota.bucket == \"Codex\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.meta | head -1)" >/dev/null && [ "$(cat "$CW_LOG_DIR/dirs/cx-1.codex")" = gpt-6.1-sol ]'
 check "Codex events reach the pane format" 'grep -q "\"e\":\"tool\",\"tool\":\"Bash\"" "$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)"'
+ev=$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)
+check "Codex events: the command is the note" 'jq -e "select(.e==\"tool\") | .note == \"ls\"" "$ev" >/dev/null'
+FAKE_THINK='**Checking the listing** of the repo for the long summary that goes past sixty characters' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -M sol <<< "go" >/dev/null 2>&1
+ev=$(ls -t "$CW_LOG_DIR"/*-coder-*.events | head -1)
+check "Codex events: a reasoning summary becomes a one-line note of at most 60 chars" 'jq -e "select(.e==\"think\") | .note | startswith(\"Checking the listing\") and length <= 60" "$ev" >/dev/null'
 CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -r cx-1 <<< "go on" >/dev/null 2>"$t/err"
 check "a Codex session resumes on Codex with its model" 'grep -qx resume "$t/cxargs" && grep -qx cx-1 "$t/cxargs" && cx gpt-6.1-sol'
 CW_CODEX_DENY="$t/private:$HOME/.ssh" CW_CODEX_DENY_GLOBS='**/secret.json:**/.env' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -w <<< "x" >/dev/null 2>"$t/err"

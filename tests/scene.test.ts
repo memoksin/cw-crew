@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   ALL_POSES, BIG_H, BIG_W, CLEAR, bigSprite, frameCount, imageSource, lookAt, lookKey, smallSprite, SMALL_H, SMALL_W,
 } from '../hooks/creatures'
-import { msysToWin, buildWorkers, DETAIL_ROWS, drawDetail, drawScene, gauges, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
+import { modelLabel, msysToWin, buildWorkers, DETAIL_ROWS, drawDetail, drawScene, gauges, layout, runState, sceneRows, sceneSvg, type Meta, type Run } from '../hooks/scene'
 
 const T0 = 1_791_562_000
 const meta = (over: Partial<Meta> = {}): Meta => ({
@@ -432,4 +432,29 @@ test('the context window falls back to a per-model default, and a real one from 
   expect(win('sonnet')).toBe(1_000_000)
   expect(win('claude-3-old')).toBe(200_000)
   expect(win('claude-sonnet-5-5', 123_000)).toBe(123_000)
+})
+
+test('the model label names any provider except the claude subscription', () => {
+  expect(modelLabel('claude-sonnet-5-5', 'claude')).toBe('sonnet')
+  expect(modelLabel('claude-sonnet-5-5', '')).toBe('sonnet')
+  expect(modelLabel('claude-sonnet-5-5', 'api')).toBe('api · sonnet 5.5')
+  expect(modelLabel('codex/gpt-6.1-sol', 'codex')).toBe('codex · gpt-6.1-sol')
+  expect(modelLabel('x-1', 'newprov')).toBe('newprov · x-1')
+})
+
+test('a Codex reasoning summary becomes the note of the next tool step', () => {
+  const run: Run = { id: 'n', meta: meta({ provider: 'codex' }), events: [
+    { e: 'think', note: 'Checking the tests', t: T0 * 1000 + 100 },
+    { e: 'tool', tool: 'Bash', arg: 'ls', note: 'ls', t: T0 * 1000 + 200 },
+    { e: 'tool', tool: 'Bash', arg: 'pwd', note: 'pwd', t: T0 * 1000 + 300 },
+  ] }
+  expect(runState(run, T0 * 1000 + 400).note).toBe('pwd')
+  expect(runState({ ...run, events: run.events.slice(0, 2) }, T0 * 1000 + 400).note).toBe('Checking the tests')
+})
+
+test('the worktree chip hides when it repeats the worker name', () => {
+  const at = (name: string) => buildWorkers([{ id: 'w', meta: meta({ name, wt: 'cc-esc', task: 'Fix the thing' }), events: [{ e: 'init', t: T0 * 1000 + 100 }] }], T0 * 1000 + 500)
+  const text = (name: string) => { const ws = drawScene(at(name), 100, T0 * 1000 + 500).words; return String.fromCodePoint(...Array.from({ length: ws.length / 3 }, (_, i) => ws[i * 3] ?? 32)) }
+  expect(text('cc-esc')).not.toContain('⎇')
+  expect(text('other')).toContain('⎇ cc-esc')
 })

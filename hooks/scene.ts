@@ -21,6 +21,7 @@ export type Meta = {
   start: number; tmo: number; web: boolean; pid: number; effort?: string; effort_src?: string
   name?: string   // fleet name from cwgo (CW_NAME): shown instead of a generated one
   effort_p?: string; maxt?: number; branch?: string; wt?: string
+  provider?: string  // claude (subscription), api, codex, ...
   cont?: boolean  // an auto-continue after the turn limit
   accept?: boolean
   quota?: QuotaMeta   // the quota read before the run
@@ -30,7 +31,7 @@ export type QuotaMeta = { home: string; bucket: string; five: number | null; wee
 export type Run = { id: string; meta: Meta; events: Ev[]; rc?: number; doneAt?: number; question?: string }
 
 export type Worker = {
-  key: string; role: Role; model: string; name: string; task: string; effort: string
+  key: string; role: Role; model: string; provider: string; name: string; task: string; effort: string
   start: number; runStart: number; resumed: boolean
   state: State; stateAt: number; arg: string; note: string; trail: Kind[]; times: number[]; lastAt: number; tmo: number
   blocked: number; question?: string; end?: number; turns: number; out: number
@@ -76,17 +77,19 @@ const ACCEPT_MS = 1_830_000   // cw's CW_ACCEPT_TMO default (1800 s) plus slack
 export function runState(run: Run, now: number): RunView {
   const start = run.meta.start * 1000
   const trail: Kind[] = [], times: number[] = []
-  let arg = '', note = '', lastTool: Ev | undefined, lastDenied: Ev | undefined, lastError: Ev | undefined
+  let arg = '', note = '', thought = '', lastTool: Ev | undefined, lastDenied: Ev | undefined, lastError: Ev | undefined
   let result: Ev | undefined, accept: Ev | undefined, accepted: Ev | undefined, blocked = 0
   let ctx = 0, add = 0, del = 0, files = 0
   const mids = new Set<string>()
   for (const ev of run.events) {
     if (ev.ctx) ctx = ev.ctx
     if (ev.mid) mids.add(ev.mid)
+    if (ev.e === 'think' && ev.note) thought = ev.note
     if (ev.e === 'tool') {
       lastTool = ev
       arg = ev.arg ?? ''
-      note = ev.note ?? ''
+      note = thought || (ev.note ?? '')   // Codex: its reasoning summary, else the command
+      thought = ''
       trail.push(kindOf(ev.tool ?? '', arg))
       times.push(ev.t)
     } else if (ev.e === 'denied') { lastDenied = ev; blocked++ }
@@ -153,6 +156,7 @@ export function buildWorkers(runs: Run[], now: number): Worker[] {
       key: prev?.key ?? run.id,
       role,
       model: run.meta.model,
+      provider: run.meta.provider ?? '',
       effort: run.meta.effort ?? '',
       name: renamed ? run.meta.name! : prev?.name ?? (run.meta.name || NAMES[role][used[role]++ % NAMES[role].length] + (used[role] > 10 ? String(Math.ceil(used[role] / 10)) : '')),
       task: renamed ? run.meta.task : prev?.task ?? run.meta.task,
@@ -343,6 +347,15 @@ export const shortModel = (m: string) => {
   const k = /haiku|sonnet|opus|fable/i.exec(m)?.[0].toLowerCase()
   return k ?? m
 }
+// The card's model label. The plain Claude subscription keeps the short name; any other provider is named first.
+export const modelLabel = (model: string, provider = '') => {
+  if (!provider || provider === 'claude') return shortModel(model)
+  const m = model.replace(/^[^/]*\//, '')
+  const v = /(haiku|sonnet|opus|fable)-(\d+)-(\d+)/i.exec(m)
+  return `${provider} · ${v ? `${v[1]!.toLowerCase()} ${v[2]}.${v[3]}` : m}`
+}
+// The worktree chip is noise when it repeats the worker's name (cwgo NAME -W NAME).
+const wtShown = (w: Worker) => (w.wt && w.wt !== w.name ? w.wt : '')
 const shorten = (s: string, n: number) => {
   const one = s.replace(/\s+/g, ' ').trim()
   return [...one].length <= n ? one : '…' + [...one].slice(-(n - 1)).join('')
@@ -494,7 +507,7 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
   hits?.push({ key: w.key, x: X, y: row(0), label: w.name, color: ink(theme) })
   const room = () => clockX - x - 2
   if (room() > 2) x += g.text(x, row(0), ' ›', ink(DIM), room())
-  if (room() > 7) x += 2 + g.text(x + 2, row(0), shortModel(w.model), ink(DIM), room() - 2)
+  if (room() > 7) x += 2 + g.text(x + 2, row(0), modelLabel(w.model, w.provider), ink(DIM), room() - 2)
   // the quota home next to the model, dropped first when narrow
   const ahome = w.quota?.home
   if (ahome && room() > 10 + [...ahome].length) x += 1 + g.text(x + 1, row(0), `· ${ahome}`, ink(FAINT), room() - 1)
@@ -533,7 +546,7 @@ function card(g: Grid, w: Worker, x0: number, y0: number, W: number, now: number
     return
   }
   let tx = X
-  if (w.wt && TW > 20) tx += 2 + g.text(X, row(2), `⎇ ${w.wt}`, ink(BRANCH), 16)
+  if (wtShown(w) && TW > 20) tx += 2 + g.text(X, row(2), `⎇ ${wtShown(w)}`, ink(BRANCH), 16)
   wrap(w.task, X + TW - tx, 1).forEach(line => g.text(tx, row(2), line, ink(DIM)))
 
   const flags: [string, number][] = []
@@ -695,7 +708,7 @@ export function drawDetail(w: Worker, cols: number, now: number, images = false)
   const stats: [string, string | false, number][][] = [
     [['cost', w.cost !== undefined && usd(w.cost), TEXT], ['cache', cache !== undefined && `${cache}%`, TEXT],
       ['out', w.out > 0 && kilo(w.out), TEXT], ['blocked', w.blocked > 0 && String(w.blocked), 0xff9e9e]],
-    [['effort', effort, w.effortSrc === 'jev' ? JEV : TEXT], ['branch', w.wt || w.branch, BRANCH],
+    [['effort', effort, w.effortSrc === 'jev' ? JEV : TEXT], ['branch', wtShown(w) || (w.wt ? '' : w.branch), BRANCH],
       ['diff', w.files > 0 && `+${w.add} −${w.del} · ${w.files} files`, TEXT]],
   ]
   stats.forEach((items, i) => {
