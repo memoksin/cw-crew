@@ -4,6 +4,8 @@
 #   -S file: JSON Schema for the report (scout, coder). Meta line: schema=pass|FAIL; on pass the
 #     compact structured_output JSON is the last stdout line. FAIL makes an rc-0 run rc 1. Not persisted: pass it again on -r.
 #   -T cmd: acceptance command, run by cw in the worker's dir after a clean finish; result in the meta line (accept=pass|FAIL).
+#   -X (or CW_ESCALATE=1): a coder whose acceptance fails is resumed once with effort raised one level (low>medium>high),
+#     then acceptance reruns; the final meta line shows the effort it ended with. Not done when effort is already high or above.
 #   A coder that hits the turn limit is resumed once with a "continue" message (CW_AUTO_CONTINUE, default 1), only if that
 #   run changed files and under half of its tool calls failed; otherwise it stops with error_max_turns for the lead.
 #   -W name: run in a git worktree in <repo>/.crew (cwwt create name; reused if it exists). -K: extra ignored path to clone
@@ -14,6 +16,7 @@
 #   -a rule: extra --allowedTools rule the lead approved after a PERMISSION request (e.g. -a 'Bash(rm /abs/file)').
 #   reviewer: read-only, no web. cw inlines the diff to review: -W name = that worktree's changes (cwwt diff),
 #     -B ref = changes since the merge base with ref, else uncommitted changes (untracked included). -f = specs.
+#     -p file (repeatable): findings of a prior review round, inlined as <prior-findings>; the reviewer answers each fixed / still open.
 # Whole body in one { } block: bash parses it all before running, so editing this file cannot break running workers.
 {
 set -uo pipefail
@@ -31,13 +34,13 @@ tlimit() {
   perl -e 'alarm shift; exec @ARGV' "$t" "$@"
 }
 
-usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-P provider] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-S schema.json] < task" >&2; exit 2; }
+usage() { echo "usage: cw scout|coder|reviewer [-M tier] [-P provider] [-C dir] [-W name [-K path]...] [-r sid] [-t sec] [-e auto|low|medium|high] [-w] [-f file]... [-a rule]... [-D dir]... [-B ref] [-p findings]... [-S schema.json] [-T cmd] [-X] < task" >&2; exit 2; }
 argv=("$@")   # for a rerun on Claude when Codex hits a limit
 role=${1:-}; shift || true
 case $role in scout|coder|reviewer) ;; *) usage ;; esac
-base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""; forced=""
-while getopts "C:r:t:wf:e:a:W:K:T:D:B:M:S:P:" o; do
-  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; S) schema=$OPTARG ;; P) forced=$OPTARG ;; *) usage ;; esac
+base=""; ask=""; dir=$PWD; dir_set=""; resume=""; tmo=""; web=""; files=(); effort=auto; granted=(); wtname=""; keep=(); accept=""; adddirs=(); tier=""; schema=""; forced=""; prior=(); escalate=""
+while getopts "C:r:t:wf:p:e:a:W:K:T:D:B:M:S:P:X" o; do
+  case $o in B) base=$OPTARG ;; C) dir=$OPTARG; dir_set=1 ;; T) accept=$OPTARG ;; W) wtname=$OPTARG ;; K) keep+=(-K "$OPTARG") ;; r) resume=$OPTARG ;; t) tmo=$OPTARG ;; w) web=1 ;; f) files+=("$OPTARG") ;; p) prior+=("$OPTARG") ;; e) effort=$OPTARG ;; a) granted+=("$OPTARG") ;; D) adddirs+=(--add-dir "$OPTARG") ;; M) tier=$OPTARG ;; S) schema=$OPTARG ;; P) forced=$OPTARG ;; X) escalate=1 ;; *) usage ;; esac
 done
 priority=""; providers=()
 if [ -n "${CW_PRIORITY:-}" ] || [ -n "$forced" ]; then
@@ -50,6 +53,7 @@ if [ -n "${CW_PRIORITY:-}" ] || [ -n "$forced" ]; then
   case ${CW_PRIORITY-} in *:) echo "cw: empty provider name" >&2; exit 2 ;; esac
   [ -z "$forced" ] || providers=("$forced")
 fi
+[ "$role" != reviewer ] && [ ${#prior[@]} -gt 0 ] && { echo "cw: -p is for reviewer" >&2; exit 2; }
 [ "$role" = reviewer ] && [ -n "$web" ] && { echo "cw: reviewer has no web" >&2; exit 2; }
 if [ -n "$schema" ]; then
   [ "$role" = reviewer ] && { echo "cw: -S is for scout and coder" >&2; exit 2; }
@@ -79,7 +83,8 @@ fi
 spec=$task
 # Tree snapshot of the work dir (tracked + untracked, no ignored), to tell real progress from looping.
 snap() { git -C "$dir" rev-parse -q --git-dir >/dev/null 2>&1 || return 0; local i; i=$(mktemp)
-  cp "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$i" 2>/dev/null
+  # -p keeps the index mtime: a fresh mtime hides same-second, same-size edits from git's racy check.
+  cp -p "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$i" 2>/dev/null
   GIT_INDEX_FILE=$i git -C "$dir" add -A >/dev/null 2>&1; GIT_INDEX_FILE=$i git -C "$dir" write-tree 2>/dev/null; rm -f "$i"; }
 
 # Inline files with code, so the worker spends no tool turns (each turn resends the whole context) reading them.
@@ -87,6 +92,13 @@ for f in "${files[@]+"${files[@]}"}"; do
   case $f in /*|[A-Za-z]:[/\\]*) p=$f ;; *) p=$dir/$f ;; esac   # absolute: POSIX or drive letter
   [ -f "$p" ] || { echo "cw: no such file: $f" >&2; exit 2; }
   task+=$'\n\n'"<file path=\"$f\">"$'\n'"$(cat "$p")"$'\n</file>'
+done
+
+# Prior-round findings for a reviewer (also on a resume: the new round may name different files).
+for f in "${prior[@]+"${prior[@]}"}"; do
+  case $f in /*|[A-Za-z]:[/\\]*) p=$f ;; *) p=$dir/$f ;; esac
+  [ -f "$p" ] || { echo "cw: no such file: $f" >&2; exit 2; }
+  task+=$'\n\n'"<prior-findings path=\"$f\">"$'\n'"$(cat "$p")"$'\n</prior-findings>'
 done
 
 # A reviewer gets its diff inline (a fresh run only; a resume already has it).
@@ -104,7 +116,17 @@ if [ "$role" = reviewer ] && [ -z "$resume" ]; then
   task+=$'\n\n'"<diff of=\"$src\">"$'\n'"$d"$'\n</diff>'
 fi
 
-report="Final message is your report: English, terse, max 15 lines unless the task asks for a longer or exhaustive report (then as long as it needs). No code dumps unless asked. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check. DONE only if every check the task asks for ran and passed; a FAIL line, a skipped check or a missed target means PARTIAL. Mark claims you did not check NOT CHECKED. The report must stand alone: never answer with 'my earlier report stands'. If a real ambiguity or a blocker stops you (a decision that is not yours, missing access, conflicting facts), stop and make the last line of your report: QUESTION: <one concrete question>. You will be resumed with the answer. If a denied call was only an extra check the task did not ask for, skip it and mark that gap NOT CHECKED. If a tool call the task needs is denied by permissions, do not retry it and do not work around it with another command that has the same effect: stop and make the last line of your report: PERMISSION: <Tool>(<exact command or path>) -- <why the task needs it>. You will be resumed with APPROVED (that exact call is then allowed: run it exactly as written) or DENIED with a reason and an alternative."
+# Status/QUESTION/PERMISSION protocol: identical at every contract level (the lead parses it).
+proto="If a real ambiguity or a blocker stops you (a decision that is not yours, missing access, conflicting facts), stop and make the last line of your report: QUESTION: <one concrete question>. You will be resumed with the answer. If a denied call was only an extra check the task did not ask for, skip it and mark that gap NOT CHECKED. If a tool call the task needs is denied by permissions, do not retry it and do not work around it with another command that has the same effect: stop and make the last line of your report: PERMISSION: <Tool>(<exact command or path>) -- <why the task needs it>. You will be resumed with APPROVED (that exact call is then allowed: run it exactly as written) or DENIED with a reason and an alternative."
+# Contract text by level (see "Contract level" below): 1 explicit (small models), 2 shorter, 3 minimal.
+report_for() {
+  case $1 in
+    1) echo "Final message is your report: English, terse, max 15 lines unless the task asks for a longer or exhaustive report (then as long as it needs). No code dumps unless asked. Before you start, restate the task's done-when to yourself and list the exact checks it names; run every one. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check. DONE only if every check the task asks for ran and passed; a FAIL line, a skipped or missing check or a missed target means PARTIAL. Then two sections: VERIFIED (each claim with the command you ran and its result) and INFERRED (everything you concluded without running it). Name any tool that failed or was unavailable. Never claim a check that did not run: mark it NOT CHECKED. The report must stand alone: never answer with 'my earlier report stands'. $proto" ;;
+    2) echo "Final message is your report: English, terse, max 15 lines unless the task asks for more. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check. DONE only if every check the task asks for ran and passed; otherwise PARTIAL. Say which claims are VERIFIED (command + result) and which are INFERRED; mark unrun checks NOT CHECKED and name any failed tool. The report must stand alone. $proto" ;;
+    *) echo "Final message is your report, English, terse. Line 1 is the status: DONE, PARTIAL or BLOCKED, plus any missed target or failing check; DONE only if the done-when holds and every check ran. $proto" ;;
+  esac
+}
+report=@@REPORT@@
 # Scouts and reviewers: read-only Bash.
 ro_allow=("Bash(rg *)" "Bash(grep *)" "Bash(fd *)" "Bash(eza *)" "Bash(ls *)" "Bash(wc *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)"
           "Bash(git log*)" "Bash(git show*)" "Bash(git diff*)" "Bash(git status*)" "Bash(git blame*)")
@@ -133,13 +155,13 @@ if [ "$role" = scout ]; then
   args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
 elif [ "$role" = reviewer ]; then
   model=${CW_REVIEWER_MODEL:-claude-sonnet-5-5}
-  sp="You are a read-only code reviewer for an orchestrator. You did not write this change: judge the inline diff fresh against the task and any spec. Bash allows only read-only commands (rg, grep, ls, sed -n, git log/show/diff/blame); read only what you need to confirm a finding. Report real defects: wrong behavior, broken contract or spec rule, missing test for changed behavior, security. Skip style unless a spec asks for it. Report: English, max 15 lines, no praise. Line 1: 'DONE review: N blocker, M suggest' or 'DONE review: clean'; 'BLOCKED <why>' if you could not review. Then one line per finding: 'BLOCKER path:line - problem; fix' or 'SUGGEST path:line - ...'. Cite only lines you read; mark unchecked ones UNSURE. If a real ambiguity stops you, last line: QUESTION: <one question>."
+  sp="You are a read-only code reviewer for an orchestrator. You did not write this change: judge the inline diff fresh against the task and any spec. Check that the change solves the stated intent and fits the system around it. Before judging a changed function, read its callers (rg/grep) and the code around it. Bash allows only read-only commands (rg, grep, ls, sed -n, git log/show/diff/blame); read only what you need to confirm a finding. Report real defects: wrong behavior, broken contract or spec rule, missing test for changed behavior, security. Skip style unless a spec asks for it. Label every finding Important, Nit or Pre-existing (a bug that was already there before this diff: do not blame the author); report at most 3 Nits. If <prior-findings> are given, do not repeat a finding that was fixed, and answer each prior finding as fixed or still open (one line each, 'PRIOR path:line - fixed' or '- still open'). Report: English, max 15 lines, no praise. Line 1: 'DONE review: N blocker, M suggest' or 'DONE review: clean'; 'BLOCKED <why>' if you could not review. Then one line per finding, the label right after the prefix: 'BLOCKER [Important] path:line - problem; fix' or 'SUGGEST [Nit] path:line - ...' or 'SUGGEST [Pre-existing] path:line - ...'. Cite only lines you read; mark unchecked ones UNSURE. If a real ambiguity stops you, last line: QUESTION: <one question>."
   tools=Read,Bash; allow=("${ro_allow[@]}")
   maxt=20
   args=(--permission-mode dontAsk --max-turns $maxt --allowedTools "${allow[@]}")
 else
   model=${CW_CODER_MODEL:-claude-sonnet-5-5}
-  sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never make a test pass by weakening it (raising a timeout, cap or threshold, dropping or rewriting an assertion): if a test looks wrong, keep it and say why, or ask. Never git commit, push, reset, clean, merge, cherry-pick, revert, am or pull, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed (also files outside the scope that a tool or import rewrote), commands run with results, test changes with before/after values, open issues."
+  sp="You are a coding worker for an orchestrator. Do only the task, inside the named scope. Files given inline are already read, but Read a file before you Edit it. Make the smallest change that meets the task and match the surrounding style. Run the acceptance commands and fix failures. Never make a test pass by weakening it (raising a timeout, cap or threshold, dropping or rewriting an assertion): if a test looks wrong, keep it and say why, or ask. Never git commit, push, reset, clean, merge, cherry-pick, revert, am or pull, and never delete files you did not create. Never kill processes by name or pattern (pkill, killall, kill -1, kill 0): on macOS a pattern like 'pkill -f cat' also matches /Applications/... and kills every app the user has open. Stop only processes you started, with: $here/cwkill PID (plain kill is not allowed; cwkill refuses any process outside your own process tree). To wait for something, prefer running it in the foreground; otherwise poll with 'sleep 5' between checks. Never build a delay from reads of /dev/zero, /dev/urandom or spin loops: they burn a full CPU core and grow memory. $report List files changed (also files outside the scope that a tool or import rewrote), commands run with results, test changes with before/after values, @@TAIL@@"
   tools=Read,Edit,Write,Bash
   ask=$coder_ask
   maxt=${CW_MAX_TURNS:-80}
@@ -258,9 +280,35 @@ if [ -n "$cdx" ]; then
   fi
 fi
 provider=claude; [ -z "$cdx" ] || provider=codex
+# Project rules: the work dir's own instruction file (nearest to the git root wins), after the static role text.
+if [ "${CW_RULES:-1}" != 0 ] && groot=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$groot" ]; then
+  d=$(cd "$dir" && pwd -P); groot=$(cd "$groot" && pwd -P); rf=""
+  while [ -z "$rf" ]; do
+    for n in AGENTS.md CLAUDE.md .claude/CLAUDE.md; do
+      [ -f "$d/$n" ] && [ ! -L "$d/$n" ] && { rf=$d/$n; break; }
+    done
+    [ "$d" = "$groot" ] || [ "$d" = / ] && break
+    d=$(dirname "$d")
+  done
+  if [ -n "$rf" ]; then
+    rmax=${CW_RULES_MAX:-16000}; rtxt=$(head -c "$rmax" "$rf")
+    [ "$(wc -c < "$rf")" -gt "$rmax" ] && rtxt+=$'\n'"[cut at $rmax bytes: Read $rf for the rest]"
+    sp+=$'\n\n'"<project-rules path=\"$rf\">"$'\n'"$rtxt"$'\n</project-rules>'
+  fi
+fi
 fi
 
 [ -n "$saved_model" ] && model=$saved_model
+
+# Contract level from the model that actually runs (a Codex fallback to Claude follows the Claude model):
+# 1 explicit (haiku, luna, any unknown/small model), 2 shorter (sonnet, sol), 3 minimal (opus, astra).
+case $model in
+  codex/*) case ${level:-$tier} in 3|opus|astra) contract=3 ;; 2|sonnet|sol) contract=2 ;; *) contract=1 ;; esac ;;
+  *opus*) contract=3 ;; *sonnet*) contract=2 ;; *) contract=1 ;;
+esac
+case $contract in 1) tail_txt=" List files changed (also files outside the scope that a tool or import rewrote), commands run with results, test changes with before/after values, open issues." ;; 2) tail_txt=" List files changed, commands run with results, open issues." ;; *) tail_txt="" ;; esac
+report=$(report_for $contract)
+sp=${sp//@@TAIL@@/$tail_txt}; sp=${sp//@@REPORT@@/$report}
 
 # Effort: an explicit -e wins; a resume keeps the effort of the run it continues; otherwise, only with CW_JEV=1,
 # Jev picks it from the spec (OpenRouter decisions API, ~1 s, ~$0.00002; sends the first 20k chars of the task).
@@ -321,11 +369,11 @@ title=$(printf '%s' "$task" | perl -ne 's/^\s*(#+\s*)?(goal|task)\s*:?\s*//i; if
 branch=$(git -C "$dir" branch --show-current 2>/dev/null)
 jq -nc --arg role "$role" --arg model "$model" --arg provider "$provider" --arg session "${CLAUDE_CODE_SESSION_ID:-}" --arg resume "$resume" \
   --arg task "$title" --argjson start "$start" --argjson tmo "$tmo" --argjson web "${web:-0}" --argjson pid $$ --arg effort "$effort" --arg esrc "$effort_src" --arg ep "$effort_p" --arg ej "$effort_jev" --arg name "${CW_NAME:-}" \
-  --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" \
+  --argjson maxt "$maxt" --arg branch "$branch" --arg wt "$wtname" --argjson cont "${CW_CONT:-0}" --argjson contract "$contract" \
   --arg qhome "${cdx:+codex}" --arg bucket "${bucket:-}" --arg a5 "${cx5:-}" --arg aw "${cxw:-}" \
   --argjson hasq "$([ -n "$cdx" ] && echo 1 || echo 0)" \
   --argjson acc "$([ -n "$accept" ] && echo true || echo false)" \
-  '{name:$name,role:$role,model:$model,provider:$provider,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1)}
+  '{name:$name,role:$role,model:$model,provider:$provider,session:$session,resume:$resume,task:$task,start:$start,tmo:$tmo,web:($web==1),pid:$pid,effort:$effort,effort_src:$esrc,effort_p:$ep,effort_jev:$ej,maxt:$maxt,branch:$branch,wt:$wt,cont:($cont==1),contract:$contract}
   + (if $hasq == 1 then {quota: {home: $qhome, bucket: $bucket, five: ($a5 | tonumber? // null), week: ($aw | tonumber? // null)}} else {} end) + (if $acc then {accept:true} else {} end)' \
   > "$log.meta"
 # The pane polls live/ (one empty marker per running worker), not the whole run dir.
@@ -370,14 +418,18 @@ cx_limit_re='usage limit|rate limit|quota'; cx_context_re='context (window|lengt
 api_limit_re='credit balance|billing'; claude_limit_re='usage limit|limit reached|rate limit'
 # A worker that prints its own environment must not put the API key into the run logs.
 redact() { if [ -n "${api_key:-}" ]; then CW_REDACT=$api_key perl -pe 'BEGIN { $| = 1; $k = $ENV{CW_REDACT} } s/\Q$k\E/[api-key]/g'; else cat; fi; }
+# One deny list for both providers: defaults + CW_DENY / CW_DENY_GLOBS. CW_CODEX_DENY(_GLOBS) keep working and add to Codex
+# only; CW_CODEX_ONLY_DENY (paths) is Codex only too.
+denyl="$HOME/.ssh:$HOME/.aws:$HOME/.azure:$HOME/.config/gcloud:$HOME/.gnupg:$HOME/.netrc:$HOME/.config/gh:${CW_DENY:-}"
+denygl="**/.env:**/.env.*:**/*.pem:**/*.key:**/*.p8:**/*.p12:**/*.pfx:**/*.crt:**/*.cer:**/*.der:**/*.jks:**/*.keystore:**/local.properties:${CW_DENY_GLOBS:-}"
 if [ -n "$cdx" ]; then
   # The lean start: 3.6k input tokens against 27k for a plain `codex exec`. agents.enabled is the switch that removes
   # the multi-agent tools and text; --disable multi_agent does not. Ignoring the user config also drops MCP and plugins.
   printf '%s\n' "$sp" > "$log.sp"
   # Reads are open disk-wide unless denied. Env lists add to these defaults; leave ~/.codex available for auth/runtime.
   fs=""; glob=""
-  IFS=: read -ra denyp <<< "$HOME/.ssh:$HOME/.aws:$HOME/.azure:$HOME/.config/gcloud:$HOME/.gnupg:$HOME/.netrc:$HOME/.config/gh:${CW_CODEX_DENY:-}"
-  IFS=: read -ra denyg <<< "**/.env:**/.env.*:**/*.pem:**/*.key:**/*.p8:**/*.p12:**/*.pfx:**/*.crt:**/*.cer:**/*.der:**/*.jks:**/*.keystore:**/local.properties:${CW_CODEX_DENY_GLOBS:-}"
+  IFS=: read -ra denyp <<< "$denyl:${CW_CODEX_DENY:-}:${CW_CODEX_ONLY_DENY:-}"
+  IFS=: read -ra denyg <<< "$denygl:${CW_CODEX_DENY_GLOBS:-}"
   for p in "${denyp[@]}"; do [ -n "$p" ] && [[ $fs != *"\"$p\"=\"deny\","* ]] && fs+="\"$p\"=\"deny\","; done
   for p in "${denyg[@]}"; do [ -n "$p" ] && [[ $glob != *"\"$p\"=\"deny\","* ]] && glob+="\"$p\"=\"deny\","; done
   cx=(--json --skip-git-repo-check --ignore-user-config --ignore-rules -m "$cdx")
@@ -438,9 +490,14 @@ else
 # Opt-in client label: headless claude -p otherwise reports sdk-cli, which users measure as a faster 5-hour drain (anthropics/claude-code#97074).
 # Not on the api provider: with a custom label an API-key run is refused with "Credit balance is too low".
 ep=(); [ -n "${CW_ENTRYPOINT:-}" ] && [ "${provider:-}" != api ] && ep=(CLAUDE_CODE_ENTRYPOINT="$CW_ENTRYPOINT")
+# Deny beats allow and ask, so -a grants cannot reopen these. Read rules (plus Edit/Write for coder); Bash reads are covered by the prompt only.
+deny=$(jq -nc --arg p "$denyl" --arg g "$denygl" --arg h "$HOME" --argjson coder "$([ "$role" = coder ] && echo true || echo false)" '
+  [($p | split(":")[] | select(. != "") | rtrimstr("/") | (if startswith($h + "/") then "~" + ltrimstr($h) else "/" + . end) as $r | $r, $r + "/**"),
+   ($g | split(":")[] | select(. != ""))] | map(. as $x | "Read(\($x))", (if $coder then "Edit(\($x))", "Write(\($x))" else empty end)) | unique')
+sp="$sp Never read or list credential or secret files: ~/.ssh, ~/.aws, ~/.gnupg, .env files, private keys and certificates, or paths the user denied. Reads there are blocked; do not try them through Bash (cat, grep, cp) either."
 printf '%s' "$task" | (cd "$dir" || exit 2; [ "$provider" != api ] || export ANTHROPIC_API_KEY="$api_key"
   tlimit "$tmo" env "${scrub[@]}" ${ep[@]+"${ep[@]}"} CLAUDE_CODE_SHELL="$(command -v bash)" \
-  claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]}}}" --model "$model" --output-format stream-json --verbose \
+  claude -p --safe-mode --settings "{\"language\":\"English\",\"permissions\":{\"ask\":${ask:-[]},\"deny\":$deny}}" --model "$model" --output-format stream-json --verbose \
   --system-prompt "$sp" --tools "$tools" "${args[@]}") 2> "$log.err" \
   | redact | tee "$log.jsonl" | jq -Rc --unbuffered "$ev" > "$log.events" 2>/dev/null
 rc=${PIPESTATUS[1]}
@@ -454,15 +511,39 @@ if [ -n "$tree0" ] && [ -n "$tree1" ] && [ "$tree0" != "$tree1" ]; then
   git -C "$dir" diff --numstat "$tree0" "$tree1" 2>/dev/null | awk -v t="$(( $(date +%s) * 1000 ))" \
     '{a+=$1; d+=$2; n++} END {printf "{\"e\":\"diff\",\"add\":%d,\"del\":%d,\"files\":%d,\"t\":%s}\n", a, d, n, t}' >> "$log.events"
 fi
+# Failure class of an api/claude run: none|turns|limit|auth|refusal|unknown. Structured fields first, text only as a last resort;
+# a run with is_error false is never a failure. Without a result line, stderr is all there is.
+cw_class() {
+  local re=$1 e
+  if [ -s "$log.json" ]; then
+    jq -r --arg re "$re" '
+      def txt: ((.result // "") | tostring);
+      def st: (.api_error_status // .error.status // null | tostring);
+      def ty: (.error.type // .api_error_type // "" | tostring);
+      if .is_error != true then "none"
+      elif (.subtype // "") | test("^error_max_(turns|budget)") then "turns"
+      elif (st | test("^(401|403)$")) or (ty | test("authentication|permission";"i")) then "auth"
+      elif (.stop_reason == "refusal") or ((.subtype // "") == "refusal") or (ty | test("refusal";"i")) then "refusal"
+      elif (st == "429") or (ty | test("rate_limit|billing|quota";"i")) then "limit"
+      elif (txt | test($re;"i")) then "limit"
+      elif (txt | test("invalid api key|authentication|unauthorized|forbidden|not logged in|please run /login|\\b40[13]\\b";"i")) then "auth"
+      elif (txt | test("^(i )?(can.?t|cannot|won.?t) (help|assist|comply)|violates? (our|the) (usage )?polic|usage policy";"i")) then "refusal"
+      else "unknown" end' "$log.json" 2>/dev/null || echo unknown
+  elif grep -qiE "$re" "$log.err" 2>/dev/null; then echo limit
+  elif grep -qiE 'invalid api key|authentication|unauthorized|forbidden|not logged in|\b40[13]\b' "$log.err" 2>/dev/null; then echo auth
+  elif [ "$rc" != 0 ]; then echo unknown
+  else echo none; fi
+}
 # A dry Claude provider can continue the same session, even with edits; Codex still needs a fresh, unchanged tree.
 if [ -n "$priority" ]; then
   dry=""
   case $provider in
     codex) case $(jq -r '.subtype // ""' "$log.json" 2>/dev/null) in usage_limit|context_limit) dry=1 ;; esac ;;
-    api) if jq -e --arg re "$api_limit_re" '.is_error == true and ((.result // "") | test($re;"i"))' "$log.json" >/dev/null 2>&1 \
-      || { ! jq -e '.is_error == false' "$log.json" >/dev/null 2>&1 && grep -qiE "$api_limit_re" "$log.err"; }; then dry=1; touch "$logdir/dirs/.api-spent"; fi ;;
-    claude) if jq -e --arg re "$claude_limit_re" '.is_error == true and ((.result // "") | test($re;"i"))' "$log.json" >/dev/null 2>&1 \
-      || { ! jq -e '.is_error == false' "$log.json" >/dev/null 2>&1 && grep -qiE "$claude_limit_re" "$log.err"; }; then dry=1; fi ;;
+    api|claude) cls=$(cw_class "$([ "$provider" = api ] && echo "$api_limit_re" || echo "$claude_limit_re")")
+      case $cls in
+        limit) dry=1; [ "$provider" != api ] || touch "$logdir/dirs/.api-spent" ;;
+        auth|refusal|unknown) [ "$rc" != 0 ] || rc=1; echo "cw: $provider failed ($cls); not falling back" >&2 ;;
+      esac ;;
   esac
   if [ -n "$dry" ]; then
     [ -n "$sid" ] || sid=$(jq -sr 'map(select(.e=="init")) | last | .sid // empty' "$log.events" 2>/dev/null)
@@ -508,6 +589,7 @@ if [ "$role" = coder ] && [ -n "$sid" ] && [ "$left" -gt 0 ] && [ "$(jq -r '.sub
   echo "cw: turn limit hit after $(( $(date +%s) - start ))s, auto-continuing sid=$sid ($left left)" >&2
   again=(-r "$sid" -t "$tmo"); [ -n "$accept" ] && again+=(-T "$accept"); [ -n "$schema" ] && again+=(-S "$schema")
   [ -z "$forced" ] || again+=(-P "$forced")
+  [ -z "$escalate" ] || again+=(-X)
   for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
   for ((i=1; i<${#adddirs[@]}; i+=2)); do again+=(-D "${adddirs[i]}"); done
   rm -f "$live"
@@ -547,6 +629,23 @@ if [ -n "$accept" ] && jq -e '.is_error | not' "$log.json" >/dev/null && [ -z "$
   if [ $arc -eq 0 ]; then acc=" accept=pass"; else
     acc=" accept=FAIL($why)"
     printf '\n--- acceptance FAILED (%s): %s\n' "$why" "$accept"; tail -20 "$log.accept"
+    if [ "$role" = coder ] && { [ -n "$escalate" ] || [ "${CW_ESCALATE:-0}" = 1 ]; } && [ "${CW_ESCALATED:-0}" != 1 ]; then
+      case $effort in low) neweff=medium ;; medium) neweff=high ;; *) neweff="" ;; esac
+      esid=$(jq -r '.session_id // empty' "$log.json")
+      if [ -z "$neweff" ]; then echo "cw: accept failed, not escalating: effort is already $effort" >&2
+      elif [ -z "$esid" ]; then echo "cw: accept failed, not escalating: no session to resume" >&2
+      else
+        echo "cw: accept failed, escalating effort $effort→$neweff" >&2
+        printf '{"e":"accept_end","ok":false,"rc":%s,"t":%s}\n' "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
+        again=(-r "$esid" -t "$tmo" -e "$neweff" -T "$accept"); [ -n "$schema" ] && again+=(-S "$schema")
+        [ -z "$forced" ] || again+=(-P "$forced")
+        for g in "${granted[@]+"${granted[@]}"}"; do again+=(-a "$g"); done
+        for ((i=1; i<${#adddirs[@]}; i+=2)); do again+=(-D "${adddirs[i]}"); done
+        rm -f "$live"
+        CW_ESCALATED=1 CW_CONT=1 exec "$0" coder "${again[@]}" <<< "Acceptance failed. Output below. Find the root cause and fix it; do not weaken the check.
+$(tail -20 "$log.accept")"
+      fi
+    fi
   fi
   printf '{"e":"accept_end","ok":%s,"rc":%s,"t":%s}\n' "$([ $arc -eq 0 ] && echo true || echo false)" "$arc" "$(( $(date +%s) * 1000 ))" >> "$log.events"
 fi

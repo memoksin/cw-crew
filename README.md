@@ -83,6 +83,9 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_API_KEYCHAIN` | — | macOS keychain item name to read the API key from (like `CW_JEV_KEYCHAIN`) |
 | `CW_API_RETRY` | 3600 | seconds before retrying an API provider marked spent |
 | `CW_CODEX_TTL` | 60 | seconds one limit reading is reused (macOS; Linux reads every run) |
+| `CW_DENY` | none | colon list of extra absolute paths denied to every worker, on top of the default credential dirs (Claude: Read deny rules, plus Edit/Write for coders, kept under `-a`; Codex: filesystem deny) |
+| `CW_DENY_GLOBS` | none | colon list of extra denied globs for every worker, on top of the default secret globs |
+| `CW_CODEX_ONLY_DENY` | none | colon list of absolute paths denied only to Codex workers (data kept Claude-only) |
 | `CW_CODEX_DENY` | `$HOME/` + `.ssh`, `.aws`, `.azure`, `.config/gcloud`, `.gnupg`, `.netrc`, `.config/gh` | colon list of extra absolute paths Codex workers may not read; defaults always apply. Other reads remain open; `.codex` is not denied (auth/runtime) |
 | `CW_CODEX_DENY_GLOBS` | `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/*.p8`, `**/*.p12`, `**/*.pfx`, `**/*.crt`, `**/*.cer`, `**/*.der`, `**/*.jks`, `**/*.keystore`, `**/local.properties` | colon list of extra denied globs under the work dir; defaults always apply, at any depth (including the root) |
 | `CW_CODEX_LUNA`, `CW_CODEX_SOL`, `CW_CODEX_ASTRA` | `gpt-6-luna`, `gpt-6.1-sol`, `gpt-6-astra` | model behind each tier |
@@ -106,6 +109,8 @@ cw reviewer -B main <<< "Focus: auth."          # review this branch since main
 | `CW_ENTRYPOINT` | — | client label for Claude workers, e.g. `cw-crew`. Unset, `claude -p` reports `sdk-cli`. Undocumented by Anthropic and may change (claude-code#97074) |
 | `CW_KILL_ALLOW` | — | colon-separated command prefixes `cwkill` may also stop |
 | `CW_ACCEPT_FAIL_RE` | `^\s*(FAIL\b(?!:? *0\b)\|SCRIPT ERROR)` | Perl regex: a `-T` run that exits 0 but prints a matching line is `accept=FAIL(output)`. Empty turns it off |
+
+Claude workers: the deny rules cover the Read/Edit/Write tools. A Bash read (`cat ~/.ssh/...`) is blocked only by the prompt and the auto-mode classifier, not by a tool rule. Codex denies at the filesystem level.
 
 Set them in `~/.claude/settings.json` under `env`.
 

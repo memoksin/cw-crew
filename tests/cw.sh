@@ -18,6 +18,7 @@ if { [ "${FAKE_DRY:-}" = api ] && [ "${ANTHROPIC_API_KEY+x}" = x ]; } || { [ "${
   [ "${FAKE_DRY_EDIT:-0}" != 1 ] || echo progress >> a.txt
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Credit balance is too low: usage limit reached","session_id":"sid-1"}'; exit 1
 fi
+[ -n "${FAKE_RAW:-}" ] && { echo "$FAKE_RAW"; exit 1; }
 sub=${FAKE_SUBTYPE:-success}
 if [ "${FAKE_TURNS:-0}" = 1 ] && ! grep -qx -- --resume "$FAKE/args"; then
   echo progress >> a.txt; sub=error_max_turns
@@ -63,6 +64,15 @@ check "short turn limit" 'arg 20'
 check "live marker gone once the run is done" '[ -d "$CW_LOG_DIR/live" ] && [ -z "$(ls -A "$CW_LOG_DIR/live")" ]'
 check "meta file records role reviewer" 'jq -e "select(.role==\"reviewer\")" "$CW_LOG_DIR"/*-reviewer-*.meta >/dev/null'
 check "work tree untouched" '[ "$(cat a.txt)" = "$(printf "one\nTWO")" ] && [ -f b.txt ]'
+
+check "reviewer sp: labels, nit cap, callers, line format" 'grep -q "Important, Nit or Pre-existing" "$t/args" && grep -q "at most 3 Nits" "$t/args" && grep -q "read its callers" "$t/args" && grep -qF "BLOCKER [Important] path:line" "$t/args" && grep -qF "DONE review: N blocker, M suggest" "$t/args"'
+printf 'BLOCKER [Important] a.txt:2 - PRIORMARK\n' > "$t/prior1.md"; printf 'SUGGEST [Nit] b.txt:1 - PRIORTWO\n' > "$t/prior2.md"
+"$here/bin/cw" reviewer -p "$t/prior1.md" -p "$t/prior2.md" <<< "x" >/dev/null 2>&1
+check "-p files inlined as <prior-findings>, 20 turns" 'grep -q "^<prior-findings" "$t/prompt" && grep -q PRIORMARK "$t/prompt" && grep -q PRIORTWO "$t/prompt" && grep -q "answer each prior finding" "$t/args" && arg 20'
+"$here/bin/cw" scout -p "$t/prior1.md" <<< "x" >/dev/null 2>&1
+check "-p refused for non-reviewer" '[ $? = 2 ]'
+"$here/bin/cw" reviewer -p "$t/none.md" <<< "x" >/dev/null 2>&1
+check "-p missing file exits 2" '[ $? = 2 ]'
 
 CW_REVIEWER_MODEL=claude-haiku-5-5 "$here/bin/cw" reviewer </dev/null >/dev/null 2>&1
 check "CW_REVIEWER_MODEL overrides; empty task gets a default" 'arg claude-haiku-5-5 && grep -q "Review the diff below." "$t/prompt"'
@@ -192,6 +202,12 @@ check "a Codex session resumes on Codex with its model" 'grep -qx resume "$t/cxa
 CW_CODEX_DENY="$t/private:$HOME/.ssh" CW_CODEX_DENY_GLOBS='**/secret.json:**/.env' CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout -w <<< "x" >/dev/null 2>"$t/err"
 check "CW_CODEX=1: scout defaults to Luna, read-only, -w turns web on" 'cx gpt-6-luna && cx "permissions.cw.extends=\":read-only\"" && cx "web_search=\"live\""'
 check "Codex env denies add to defaults without duplicate TOML keys" 'cxdefaults && cx "\"$t/private\"=\"deny\"" && cx "\"**/secret.json\"=\"deny\"" && [ "$(grep -oF "\"$HOME/.ssh\"=\"deny\"" "$t/cxargs" | wc -l | tr -d " ")" = 1 ] && [ "$(grep -oF "\"**/.env\"=\"deny\"" "$t/cxargs" | wc -l | tr -d " ")" = 1 ]'
+rm -f "$t/args" "$t/cxargs"; CW_DENY="$t/shared" CW_DENY_GLOBS='**/shared.json' CW_CODEX_ONLY_DENY="$t/cxonly" CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "CW_DENY and CW_CODEX_ONLY_DENY reach the Codex config, defaults stay" 'cxdefaults && cx "\"$t/shared\"=\"deny\"" && cx "\"**/shared.json\"=\"deny\"" && cx "\"$t/cxonly\"=\"deny\""'
+rm -f "$t/args"; CW_DENY="$t/shared" CW_DENY_GLOBS='**/shared.json' CW_CODEX_DENY="$t/cxold" CW_CODEX_ONLY_DENY="$t/cxonly" "$here/bin/cw" coder -a 'Read(~/.ssh/config)' <<< "x" >/dev/null 2>&1
+cset=$(grep -m1 '^{"language"' "$t/args")
+check "Claude settings deny ~/.ssh and CW_DENY paths for Read/Edit/Write, even with -a" 'jq -e --arg s "/$t/shared" "(.permissions.deny | index(\"Read(~/.ssh/**)\") != null and index(\"Write(~/.ssh/**)\") != null and index(\"Read(\" + \$s + \"/**)\") != null and index(\"Read(**/.env)\") != null and index(\"Read(**/shared.json)\") != null)" <<< "$cset" >/dev/null'
+check "CW_CODEX_ONLY_DENY and CW_CODEX_DENY stay out of the Claude settings" '! grep -q "cxonly\|cxold" "$t/args"'
 rm -f "$t/args"; CW_CODEX=1 CW_CODEX_TTL=0 "$here/bin/cw" coder -a 'Bash(ls)' <<< "x" >/dev/null 2>&1
 check "-a keeps the run on Claude" 'arg claude-sonnet-5-5'
 rm -f "$t/args"; CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>"$t/err"
@@ -233,6 +249,13 @@ FAKE_STDERR=billing FAKE_RESULT="DONE billing report" "$here/bin/cw" coder <<< "
 check "priority: API success mentioning billing in result and stderr is not dry" '[ $rc = 0 ] && [ ! -e "$CW_LOG_DIR/dirs/.api-spent" ] && [ "$(cat "$t/calls")" = "api " ] && grep -q "rc=0 success" "$t/err"'
 CW_PRIORITY=claude:api FAKE_RESULT="DONE checked rate limit" FAKE_STDERR="usage limit" "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "priority: Claude success mentioning rate limit in report stays successful" '[ $rc = 0 ] && [ ! -s "$t/key" ] && grep -q "rc=0 success" "$t/err" && ! grep -q "trying next provider" "$t/err"'
+: > "$t/calls"
+CW_PRIORITY=api:claude FAKE_RAW='{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid authentication credentials; rate limit docs","session_id":"sid-1"}' "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "fallback: 401 failure does not hop" '[ $rc != 0 ] && [ "$(cat "$t/calls")" = "api " ] && grep -qx "cw: api failed (auth); not falling back" "$t/err" && ! grep -q "trying next provider" "$t/err"'
+: > "$t/calls"
+CW_PRIORITY=api:claude FAKE_DRY=api "$here/bin/cw" coder <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "fallback: real usage limit still hops to next provider" '[ "$(head -1 "$t/calls")" = "api " ] && [ "$(sed -n 2p "$t/calls" | cut -c1-4)" != "api " ] && grep -q "api stopped (usage_limit); trying next provider" "$t/err" && ! grep -q "not falling back" "$t/err"'
+rm -f "$CW_LOG_DIR/dirs/.api-spent"
 CW_PRIORITY="" CW_CODEX=1 FAKE_USED=95 "$here/bin/cw" scout <<< "x" >/dev/null 2>"$t/err"; rc=$?
 check "empty priority: legacy Codex threshold and no provider diagnostic" '[ $rc = 0 ] && arg claude-haiku-5-5 && grep -q "Codex limit at 95% used" "$t/err" && ! grep -q "cw: provider=" "$t/err"'
 CW_PRIORITY="" "$here/bin/cw" coder -P claude <<< "x" >/dev/null 2>"$t/err"; rc=$?
@@ -314,6 +337,62 @@ CW_ENTRYPOINT=cw-crew CW_PRIORITY=api CW_API_KEY=k "$here/bin/cw" scout <<< "x" 
 check "api provider: no custom client label" '[ ! -s "$t/ep" ]'
 CW_PRIORITY=api CW_API_KEY=sk-test-redact-123 FAKE_RESULT="leak sk-test-redact-123" "$here/bin/cw" scout <<< "x" > "$t/out" 2>"$t/err"
 check "an API key printed by the worker is redacted in logs and report" '! grep -rqF sk-test-redact-123 "$CW_LOG_DIR" "$t/out" "$t/err" && grep -qF "[api-key]" "$t/out"'
+
+# Contract level follows the resolved model: haiku explicit, sonnet shorter, opus minimal.
+"$here/bin/cw" scout <<< "x" >/dev/null 2>&1; sp1=$(cat "$t/prompt" "$t/args")
+check "contract: haiku scout prompt has VERIFIED/INFERRED, protocol intact" 'grep -q VERIFIED <<< "$sp1" && grep -q INFERRED <<< "$sp1" && grep -q "QUESTION: <one concrete question>" <<< "$sp1" && grep -q "PERMISSION: <Tool>" <<< "$sp1"'
+check "contract: haiku scout .meta has contract 1" '[ "$(jq -r .contract "$(ls -t "$CW_LOG_DIR"/*.meta | head -1)")" = 1 ]'
+"$here/bin/cw" coder -M opus <<< "x" >/dev/null 2>&1; sp3=$(cat "$t/prompt" "$t/args")
+check "contract: opus coder prompt has no VERIFIED/INFERRED, protocol intact" '! grep -q "VERIFIED\|INFERRED" <<< "$sp3" && grep -q "QUESTION: <one concrete question>" <<< "$sp3" && grep -q "PERMISSION: <Tool>" <<< "$sp3"'
+check "contract: opus coder .meta has contract 3" '[ "$(jq -r .contract "$(ls -t "$CW_LOG_DIR"/*.meta | head -1)")" = 3 ]'
+CW_CODEX=0 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>&1
+check "contract: sol falling back to Sonnet keeps contract 2" '[ "$(jq -r .contract "$(ls -t "$CW_LOG_DIR"/*.meta | head -1)")" = 2 ]'
+# Project rules in the worker system prompt (claude --system-prompt, codex model_instructions_file).
+rr=$t/rrepo; mkdir -p "$rr/sub"; git -C "$rr" init -q -b main; cd "$rr" || exit 1
+spof() { awk '/^--tools$/ {p=0} p {print} /^--system-prompt$/ {p=1}' "$t/args"; }
+printf 'CLAUDE-RULES-XYZ\n' > CLAUDE.md
+"$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "rules: only CLAUDE.md goes into the claude system prompt" 'spof | grep -q "<project-rules path=\".*CLAUDE.md\">" && spof | grep -q CLAUDE-RULES-XYZ && [ "$(spof | head -c 20)" = "You are a read-only " ]'
+printf 'AGENTS-RULES-XYZ\n' > AGENTS.md
+"$here/bin/cw" coder -C sub <<< "x" >/dev/null 2>&1
+check "rules: AGENTS.md beats CLAUDE.md (walks up from a subdir)" 'spof | grep -q AGENTS-RULES-XYZ && ! spof | grep -q CLAUDE-RULES-XYZ'
+CW_RULES=0 "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "rules: CW_RULES=0 adds nothing" '! spof | grep -q "project-rules"'
+head -c 300 /dev/zero | tr '\0' 'a' > AGENTS.md
+CW_RULES_MAX=100 "$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "rules: oversize file is cut with a notice" 'spof | grep -q "cut at 100 bytes: Read .*AGENTS.md for the rest" && ! spof | grep -q "a\{101\}"'
+printf 'OUTSIDE-RULES\n' > "$t/AGENTS.md"; rm -f AGENTS.md CLAUDE.md
+"$here/bin/cw" scout <<< "x" >/dev/null 2>&1
+check "rules: files outside the git root are never used" '! spof | grep -q "project-rules\|OUTSIDE-RULES"'
+printf 'CX-RULES-XYZ\n' > AGENTS.md
+printf '#!/usr/bin/env bash
+cat >/dev/null
+echo "{\"type\":\"turn.completed\",\"usage\":{}}"
+' > "$t/bin/codex"; chmod +x "$t/bin/codex"
+CW_CODEX=1 "$here/bin/cw" coder -M sol <<< "x" >/dev/null 2>&1
+sp=$(ls -t "$CW_LOG_DIR"/*.sp | head -1)
+check "rules: codex model_instructions_file carries the rules" 'grep -q "CX-RULES-XYZ" "$sp" && grep -q "<project-rules" "$sp"'
+rm -f "$t/bin/codex"; cd "$r" || exit 1
+# Escalation on failed acceptance (-X / CW_ESCALATE=1): once, one level up, never past high.
+acc="if [ -e '$t/esc-ok' ]; then exit 0; else touch '$t/esc-ok'; echo 'FAIL boom'; exit 1; fi"
+rm -f "$t/calls" "$t/esc-ok"
+"$here/bin/cw" coder -X -e low -T "$acc" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "escalate: failed acceptance resumes once at the next effort, then passes" '[ $rc = 0 ] && [ "$(wc -l < "$t/calls" | tr -d " ")" = 2 ] && grep -q "escalating effort low→medium" "$t/err" && grep -q "effort=medium(flag) .* accept=pass" "$t/err" && arg medium && grep -q "^Acceptance failed. Output below." "$t/prompt" && grep -q "FAIL boom" "$t/prompt" && grep -q "do not weaken the check" "$t/prompt"'
+rm -f "$t/calls" "$t/esc-ok"
+CW_ESCALATE=1 "$here/bin/cw" coder -T "$acc" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "escalate: CW_ESCALATE=1 works, default medium goes to high" '[ $rc = 0 ] && grep -q "escalating effort medium→high" "$t/err" && grep -q "effort=high(flag) .* accept=pass" "$t/err"'
+rm -f "$t/calls" "$t/esc-ok"
+"$here/bin/cw" coder -X -e high -T "$acc" <<< "x" >/dev/null 2>"$t/err"
+check "escalate: already high does not escalate and says why" '[ "$(wc -l < "$t/calls" | tr -d " ")" = 1 ] && grep -q "not escalating: effort is already high" "$t/err" && grep -q "accept=FAIL" "$t/err"'
+rm -f "$t/calls" "$t/esc-ok"
+"$here/bin/cw" coder -T "$acc" <<< "x" >/dev/null 2>"$t/err"
+check "escalate: off without -X/CW_ESCALATE" '[ "$(wc -l < "$t/calls" | tr -d " ")" = 1 ] && ! grep -q escalat "$t/err" && grep -q "effort=medium(default) .* accept=FAIL" "$t/err"'
+rm -f "$t/calls" "$t/esc-ok"
+"$here/bin/cw" coder -X -e low -T 'echo FAIL always; exit 1' <<< "x" >/dev/null 2>"$t/err"
+check "escalate: only once per cw call" '[ "$(wc -l < "$t/calls" | tr -d " ")" = 2 ] && [ "$(grep -c "escalating effort" "$t/err")" = 1 ] && grep -q "accept=FAIL" "$t/err"'
+rm -f "$t/calls" "$t/esc-ok"
+FAKE_TURNS=1 "$here/bin/cw" coder -X -e low -T "$acc" <<< "x" >/dev/null 2>"$t/err"; rc=$?
+check "escalate: -X survives the turn-limit auto-continue" '[ $rc = 0 ] && grep -q "auto-continuing" "$t/err" && grep -q "escalating effort low→medium" "$t/err"'
 
 "$here/bin/cwwt" rm w1 >/dev/null 2>&1
 echo; [ $fails = 0 ] && echo "all passed (0 failures)" || { echo "$fails failed"; exit 1; }
